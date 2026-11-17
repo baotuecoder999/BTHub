@@ -136,11 +136,10 @@ def get_auth_ticket(cookie):
 
 def launch_package_tab(pkg, game_id, acc_info=None):
     display_name = acc_info["name"] if acc_info else "Chưa gắn Cookie"
-    print(f"\n{C_YELLOW}{C_BOLD}  [⏳] ĐANG KHỞI ĐỘNG TAB: {pkg}{C_RESET}")
+    print(f"\n{C_YELLOW}{C_BOLD}  [⏳] ĐANG KÍCH HOẠT VÀ ĐĂNG NHẬP CHO TAB: {pkg}{C_RESET}")
     print(f"       {C_WHITE}• Tài khoản : {C_PURPLE}{display_name}{C_RESET}")
     print(f"       {C_WHITE}• Join Game : {C_CYAN}{game_id}{C_RESET}")
     
-    # Ép đóng ứng dụng trước khi mở mới
     os.system(f"am force-stop {pkg} 2>/dev/null || su -c 'am force-stop {pkg}'")
     time.sleep(2)
     
@@ -148,8 +147,7 @@ def launch_package_tab(pkg, game_id, acc_info=None):
         cookie = acc_info["cookie"]
         ticket = get_auth_ticket(cookie)
         
-        # Cơ chế bơm trực tiếp Cookie vào thư mục nội bộ của App (Hỗ trợ các bản mod như Noka, Delta)
-        # Tạo file SharedPreferences hoặc WebView cookies giả lập để app tự nhận diện tài khoản
+        # Bơm file cookie trực tiếp vào WebView/Internal Storage của app mod (Noka, Delta...)
         inject_cmd = f"""su -c '
         mkdir -p /data/data/{pkg}/app_webview/Default/
         cat << "EOF" > /data/data/{pkg}/app_webview/Default/Cookies
@@ -161,15 +159,13 @@ def launch_package_tab(pkg, game_id, acc_info=None):
         os.system(inject_cmd)
 
         if ticket:
-            # Gửi đồng thời cả URL Ticket và đánh thức Intent của Client Mod
             url = f"roblox://placeId={game_id}&ticket={ticket}"
             os.system(f'am start -p {pkg} -a android.intent.action.VIEW -d "{url}" > /dev/null 2>&1')
-            print(f"{C_GREEN}{C_BOLD}  [✔] ĐÃ BƠM COOKIE & GỬI VÉ JOIN GAME ID {game_id}!{C_RESET}")
+            print(f"{C_GREEN}{C_BOLD}  [✔] ĐÃ BƠM COOKIE & LOGIN THÀNH CÔNG VÀO GAME ID {game_id}!{C_RESET}")
             return
         else:
-            print(f"{C_RED}{C_BOLD}  [⚠] Không lấy được Ticket, đang mở trực tiếp App bằng Cookie nội bộ...{C_RESET}")
+            print(f"{C_RED}{C_BOLD}  [⚠] Lấy ticket thất bại, đang mở app bằng cookie nội bộ...{C_RESET}")
 
-    # Mở trực tiếp App nếu không có cookie
     url_direct = f"roblox://placeId={game_id}"
     os.system(f'am start -p {pkg} -a android.intent.action.VIEW -d "{url_direct}" > /dev/null 2>&1')
     print(f"{C_GREEN}{C_BOLD}  [✔] ĐÃ MỞ APP & JOIN THẲNG VÀO GAME ID {game_id}!{C_RESET}")
@@ -254,7 +250,7 @@ while True:
     print(f"\n{C_CYAN}{C_BOLD}   ══════════════════════════[ BẢNG ĐIỀU KHIỂN CHÍNH ]══════════════════════════{C_RESET}\n")
     print(f"      {C_GREEN}{C_BOLD}[1]{C_RESET}   🚀   {C_WHITE}{C_BOLD}KHỞI ĐỘNG TẤT CẢ TAB ĐÃ SET & CHẠY AUTO-REJOIN{C_RESET}\n")
     print(f"      {C_GREEN}{C_BOLD}[2]{C_RESET}   📦   {C_WHITE}{C_BOLD}SET PACKAGE & CHỌN PACKAGE CHẠY TRÊN CLOUDPHONE{C_RESET}\n")
-    print(f"      {C_GREEN}{C_BOLD}[3]{C_RESET}   🍪   {C_WHITE}{C_BOLD}NHẬP NHIỀU COOKIE HÀNG LOẠT & GẮN VÀO PACKAGE{C_RESET}\n")
+    print(f"      {C_GREEN}{C_BOLD}[3]{C_RESET}   🍪   {C_WHITE}{C_BOLD}NHẬP NHIỀU COOKIE HÀNG LOẠT & TỰ ĐỘNG LOGIN VÀO PACKAGE{C_RESET}\n")
     print(f"      {C_GREEN}{C_BOLD}[4]{C_RESET}   ⚙️    {C_WHITE}{C_BOLD}CÀI ĐẶT ID GAME & THỜI GIAN QUÉT (DELAY){C_RESET}\n")
     print(f"      {C_GREEN}{C_BOLD}[5]{C_RESET}   🛑   {C_WHITE}{C_BOLD}KILL TOÀN BỘ TAB ROBLOX NGAY LẬP TỨC{C_RESET}\n")
     print(f"      {C_GREEN}{C_BOLD}[6]{C_RESET}   📊   {C_WHITE}{C_BOLD}KIỂM TRA TRẠNG THÁI IN-GAME (THEO PACKAGE ĐÃ SET){C_RESET}\n")
@@ -342,7 +338,7 @@ while True:
     elif choice == "3":
         os.system("clear")
         print(f"{C_CYAN}{C_BOLD}╔════════════════════════════════════════════════════════════════════════════╗{C_RESET}")
-        print(f"{C_CYAN}{C_BOLD}║              NHẬP NHIỀU COOKIE HÀNG LOẠT VÀO CÁC PACKAGE                   ║{C_RESET}")
+        print(f"{C_CYAN}{C_BOLD}║              NHẬP HÀNG LOẠT COOKIE & TỰ ĐỘNG LOGIN VÀO APP                 ║{C_RESET}")
         print(f"{C_CYAN}{C_BOLD}╚════════════════════════════════════════════════════════════════════════════╝{C_RESET}\n")
         saved_pkgs = cfg.get("packages", [])
         if not saved_pkgs:
@@ -356,9 +352,9 @@ while True:
             print(f"     {C_YELLOW}{C_BOLD}[{i+1}]{C_RESET}  {C_WHITE}{C_BOLD}{item['pkg']:<30}{C_RESET} {C_PURPLE}(Hiện tại: {acc_match}){C_RESET}\n")
             
         print(f"{C_CYAN}──────────────────────────────────────────────────────────────────────────────{C_RESET}")
-        print(f"  {C_YELLOW}HƯỚNG DẪN NHẬP HÀNG LOẠT:{C_RESET}")
-        print(f"  Dán danh sách nhiều Cookie (mỗi dòng 1 cookie).")
-        print(f"  Tool sẽ tự động gán lần lượt vào các Package từ trên xuống dưới.\n")
+        print(f"  {C_YELLOW}HƯỚNG DẪN NHẬP & LOGIN TỰ ĐỘNG:{C_RESET}")
+        print(f"  - Dán danh sách nhiều Cookie (mỗi dòng 1 cookie).")
+        print(f"  - Tool sẽ tự động gán vào Package, đồng thời **tự động khởi động từng Package** để login vào game ngay lập tức.\n")
         
         print(f"{C_CYAN}{C_BOLD}  ➔ Dán danh sách Cookie (Gõ 'END' ở dòng cuối để kết thúc):{C_RESET}")
         
@@ -382,7 +378,7 @@ while True:
         if not raw_cookies:
             raw_cookies = [c.strip() for c in "".join(lines).split() if len(c) > 50]
 
-        print(f"\n{C_YELLOW}  [⏳] Đang xác thực {len(raw_cookies)} Cookie với Roblox...{C_RESET}")
+        print(f"\n{C_YELLOW}  [⏳] Đang xác thực {len(raw_cookies)} Cookie và tiến hành Login hàng loạt...{C_RESET}")
         
         success_count = 0
         for idx, raw_ck in enumerate(raw_cookies):
@@ -393,14 +389,20 @@ while True:
             uid, uname, valid_ck = verify_cookie(raw_ck)
             if uid:
                 cfg["accounts"] = [a for a in cfg["accounts"] if a["pkg"] != target_pkg]
-                cfg["accounts"].append({"name": uname, "uid": uid, "pkg": target_pkg, "cookie": valid_ck})
+                new_acc = {"name": uname, "uid": uid, "pkg": target_pkg, "cookie": valid_ck}
+                cfg["accounts"].append(new_acc)
+                save_cfg(cfg)
+                
                 print(f"  {C_GREEN}[✔] Gắn thành công: {C_PURPLE}{uname}{C_GREEN} ➔ {target_pkg}{C_RESET}")
+                # LOGIC MỚI: Tự động khởi động và login thẳng vào app ngay sau khi nhận cookie thành công
+                launch_package_tab(target_pkg, cfg["game_id"], new_acc)
                 success_count += 1
+                time.sleep(4) # Nghỉ ngắn giữa các tab để CloudPhone không bị quá tải
             else:
                 print(f"  {C_RED}[✖] Cookie thứ {idx+1} không hợp lệ hoặc đã chết, bỏ qua.{C_RESET}")
                 
         save_cfg(cfg)
-        print(f"\n{C_GREEN}{C_BOLD}  [✔ HOÀN TẤT] Đã gán thành công {success_count} tài khoản!{C_RESET}")
+        print(f"\n{C_GREEN}{C_BOLD}  [✔ HOÀN TẤT] Đã gán và khởi động thành công {success_count} tài khoản!{C_RESET}")
         input(f"\n{C_DIM}  Bấm Enter để quay lại Menu chính...{C_RESET}")
         
     elif choice == "4":
