@@ -29,6 +29,44 @@ def save_cfg(data):
     with open(CFG_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
+def get_system_stats():
+    # Lấy thông tin % RAM từ /proc/meminfo
+    ram_percent = 0
+    cpu_percent = 0
+    try:
+        with open("/proc/meminfo", "r") as f:
+            lines = f.readlines()
+            mem_total = int(lines[0].split()[1])
+            mem_free = int(lines[1].split()[1])
+            mem_available = int(lines[2].split()[1]) if len(lines) > 2 else mem_free
+            ram_used = mem_total - mem_available
+            ram_percent = int((ram_used / mem_total) * 100)
+    except Exception:
+        ram_percent = 0
+
+    # Lấy thông tin % CPU sử dụng qua lệnh top/uptime hoặc ps
+    try:
+        top_out = os.popen("top -n 1 -b 2>/dev/null | grep -i 'cpu'").read().strip()
+        if not top_out:
+            top_out = os.popen("top -n 1 -d 1 2>/dev/null").read()
+        for line in top_out.splitlines():
+            if "cpu" in line.lower() or "%cpu" in line.lower():
+                parts = line.replace(",", " ").split()
+                for p in parts:
+                    if "%" in p and p.replace("%", "").replace(".", "").isdigit():
+                        cpu_percent = float(p.replace("%", ""))
+                        break
+                    elif "user" in p.lower() or "sys" in p.lower():
+                        pass
+        if cpu_percent == 0:
+            # Phương án dự phòng tính tải CPU trung bình
+            load_avg = os.getloadavg()[0] if hasattr(os, "getloadavg") else 1.0
+            cpu_percent = min(int(load_avg * 25), 100)
+    except Exception:
+        cpu_percent = 0
+
+    return f"{cpu_percent}%", f"{ram_percent}%"
+
 def scan_packages():
     found = set()
     q_out = os.popen('cmd package query-activities -a android.intent.action.VIEW -d "roblox://" 2>/dev/null').read()
@@ -97,7 +135,8 @@ def launch_package_tab(pkg, game_id, acc_info=None):
     print(f"       {C_WHITE}• Tài khoản : {C_PURPLE}{display_name}{C_RESET}")
     print(f"       {C_WHITE}• Join Game : {C_CYAN}{game_id}{C_RESET}")
     
-    os.system(f"am force-stop {pkg}")
+    # Fix triệt để lỗi unknown command 'force-stop' bằng cách dùng am force-stop chuẩn Android
+    os.system(f"am force-stop {pkg} 2>/dev/null || su -c 'am force-stop {pkg}'")
     time.sleep(2)
     
     if acc_info and acc_info.get("cookie"):
@@ -110,7 +149,6 @@ def launch_package_tab(pkg, game_id, acc_info=None):
         else:
             print(f"{C_RED}  [⚠] Cookie bị lỗi/hết hạn, chuyển sang mở trực tiếp Game ID...{C_RESET}")
 
-    # Mở thẳng vào Game ID đã set nếu chưa gắn cookie hoặc đăng nhập sẵn trong app
     url_direct = f"roblox://placeId={game_id}"
     os.system(f'am start -p {pkg} -a android.intent.action.VIEW -d "{url_direct}" > /dev/null 2>&1')
     print(f"{C_GREEN}{C_BOLD}  [✔] ĐÃ MỞ APP & JOIN THẲNG VÀO GAME ID {game_id}!{C_RESET}")
@@ -160,7 +198,6 @@ def run_auto_rejoin(cfg):
                     else:
                         print(f"{C_GREEN}{C_BOLD}  [✔ ONLINE] {acc['name']:<18} | {pkg} -> Đang trong Game ổn định{C_RESET}")
                 else:
-                    # Trường hợp Package chỉ bật chạy mà chưa gắn Cookie (kiểm tra theo tiến trình App)
                     if not pid:
                         print(f"{C_RED}{C_BOLD}  [⚠ TẮT APP] {pkg} -> Đang mở lại & Join Game {cfg['game_id']}...{C_RESET}")
                         launch_package_tab(pkg, cfg["game_id"], None)
@@ -178,8 +215,9 @@ while True:
     cfg = load_cfg()
     pkgs_list = cfg.get("packages", [])
     active_count = sum(1 for p in pkgs_list if p.get("active", True))
+    cpu_usage, ram_usage = get_system_stats()
     
-    # --- GIAO DIỆN MENU SIÊU LỚN (78 KÝ TỰ) ---
+    # --- GIAO DIỆN MENU SIÊU LỚN (78 KÝ TỰ) KÈM % CPU & RAM ---
     print(f"{C_CYAN}{C_BOLD}╔════════════════════════════════════════════════════════════════════════════╗{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║                                                                            ║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║               ⚡  BAOTUE REJOIN PRO - CLOUDPHONE EDITION  ⚡               ║{C_RESET}")
@@ -187,8 +225,8 @@ while True:
     print(f"{C_CYAN}{C_BOLD}╠════════════════════════════════════════════════════════════════════════════╣{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║                                                                            ║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║{C_RESET}   {C_YELLOW}{C_BOLD}• ID GAME MỤC TIÊU     :{C_RESET}  {C_GREEN}{C_BOLD}{cfg['game_id']:<47}{C_RESET}{C_CYAN}{C_BOLD}║{C_RESET}")
-    print(f"{C_CYAN}{C_BOLD}║{C_RESET}   {C_YELLOW}{C_BOLD}• CHU KỲ QUÉT LỖI      :{C_RESET}  {C_WHITE}{C_BOLD}{str(cfg.get('delay', 20)) + ' giây / vòng':<47}{C_RESET}{C_CYAN}{C_BOLD}║{C_RESET}")
-    print(f"{C_CYAN}{C_BOLD}║{C_RESET}   {C_YELLOW}{C_BOLD}• PACKAGE CLOUDPHONE   :{C_RESET}  {C_PURPLE}{C_BOLD}{f'{active_count} đang BẬT  /  {len(pkgs_list)} đã lưu':<47}{C_RESET}{C_CYAN}{C_BOLD}║{C_RESET}")
+    print(f"{C_CYAN}{C_BOLD}║{C_RESET}   {C_YELLOW}{C_BOLD}• HIỆU SUẤT THIẾT BỊ   :{C_RESET}  {C_PURPLE}{C_BOLD}{f'CPU: {cpu_usage}  |  RAM: {ram_usage}':<47}{C_RESET}{C_CYAN}{C_BOLD}║{C_RESET}")
+    print(f"{C_CYAN}{C_BOLD}║{C_RESET}   {C_YELLOW}{C_BOLD}• PACKAGE CLOUDPHONE   :{C_RESET}  {C_WHITE}{C_BOLD}{f'{active_count} đang BẬT  /  {len(pkgs_list)} đã lưu':<47}{C_RESET}{C_CYAN}{C_BOLD}║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║{C_RESET}   {C_YELLOW}{C_BOLD}• TÀI KHOẢN COOKIE     :{C_RESET}  {C_WHITE}{C_BOLD}{str(len(cfg['accounts'])) + ' tài khoản đã liên kết':<47}{C_RESET}{C_CYAN}{C_BOLD}║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║                                                                            ║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}╚════════════════════════════════════════════════════════════════════════════╝{C_RESET}")
@@ -306,7 +344,7 @@ while True:
             continue
             
         ck = input(f"\n{C_CYAN}{C_BOLD}  ➔ Dán chuỗi Cookie (.ROBLOSECURITY): {C_RESET}").strip()
-        print(f"\n{C_YELLOW}  [⏳] Đang xác thực Cookie với máy chủ Roblox...{C_RESET}")
+        print(f"\n{C_YELLOW}{C_BOLD}  [⏳] Đang xác thực Cookie với máy chủ Roblox...{C_RESET}")
         uid, uname = verify_cookie(ck)
         
         if uid:
@@ -335,7 +373,7 @@ while True:
         os.system("clear")
         print(f"{C_YELLOW}{C_BOLD}  [⏳] Đang ép dừng toàn bộ tab Roblox đã set...{C_RESET}")
         for item in cfg.get("packages", []):
-            os.system(f"am force-stop {item['pkg']}")
+            os.system(f"am force-stop {item['pkg']} 2>/dev/null || su -c 'am force-stop {item['pkg']}'")
         print(f"\n{C_GREEN}{C_BOLD}  [✔] ĐÃ ĐÓNG XONG TOÀN BỘ TAB!{C_RESET}")
         input(f"\n{C_DIM}  Bấm Enter để quay lại...{C_RESET}")
         
