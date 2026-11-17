@@ -30,7 +30,6 @@ def save_cfg(data):
         json.dump(data, f, indent=2)
 
 def get_system_stats():
-    # Lấy thông tin % RAM từ /proc/meminfo
     ram_percent = 0
     cpu_percent = 0
     try:
@@ -44,7 +43,6 @@ def get_system_stats():
     except Exception:
         ram_percent = 0
 
-    # Lấy thông tin % CPU sử dụng qua lệnh top/uptime hoặc ps
     try:
         top_out = os.popen("top -n 1 -b 2>/dev/null | grep -i 'cpu'").read().strip()
         if not top_out:
@@ -56,10 +54,7 @@ def get_system_stats():
                     if "%" in p and p.replace("%", "").replace(".", "").isdigit():
                         cpu_percent = float(p.replace("%", ""))
                         break
-                    elif "user" in p.lower() or "sys" in p.lower():
-                        pass
         if cpu_percent == 0:
-            # Phương án dự phòng tính tải CPU trung bình
             load_avg = os.getloadavg()[0] if hasattr(os, "getloadavg") else 1.0
             cpu_percent = min(int(load_avg * 25), 100)
     except Exception:
@@ -88,6 +83,11 @@ def scan_packages():
 
 def verify_cookie(cookie):
     try:
+        # Làm sạch định dạng cookie nếu người dùng lỡ copy thừa dấu nháy hoặc tiền tố
+        cookie = cookie.strip().strip('"').strip("'")
+        if ".ROBLOSECURITY=" in cookie:
+            cookie = cookie.split(".ROBLOSECURITY=")[1].split(";")[0]
+
         r = requests.get(
             "https://users.roblox.com/v1/users/authenticated",
             cookies={".ROBLOSECURITY": cookie},
@@ -95,10 +95,10 @@ def verify_cookie(cookie):
         )
         if r.status_code == 200:
             data = r.json()
-            return str(data["id"]), data["name"]
+            return str(data["id"]), data["name"], cookie
     except Exception:
         pass
-    return None, None
+    return None, None, None
 
 def is_in_game(user_id):
     if not user_id:
@@ -121,21 +121,29 @@ def get_auth_ticket(cookie):
     try:
         s = requests.Session()
         s.cookies[".ROBLOSECURITY"] = cookie
-        headers = {"Referer": "https://www.roblox.com/"}
+        headers = {
+            "User-Agent": "Roblox/WinInet",
+            "Referer": "https://www.roblox.com/"
+        }
+        # Bước 1: Lấy CSRF token
         r1 = s.post("https://auth.roblox.com/v1/authentication-ticket", headers=headers, timeout=10)
-        headers["x-csrf-token"] = r1.headers.get("x-csrf-token", "")
+        csrf = r1.headers.get("x-csrf-token")
+        if csrf:
+            headers["x-csrf-token"] = csrf
+        
+        # Bước 2: Lấy vé đăng nhập chuẩn
         r2 = s.post("https://auth.roblox.com/v1/authentication-ticket", headers=headers, timeout=10)
-        return r2.headers.get("rbx-authentication-ticket")
+        ticket = r2.headers.get("rbx-authentication-ticket")
+        return ticket
     except Exception:
         return None
 
 def launch_package_tab(pkg, game_id, acc_info=None):
-    display_name = acc_info["name"] if acc_info else "Chưa gắn Cookie (Dùng Nick có sẵn)"
+    display_name = acc_info["name"] if acc_info else "Chưa gắn Cookie"
     print(f"\n{C_YELLOW}{C_BOLD}  [⏳] ĐANG KHỞI ĐỘNG TAB: {pkg}{C_RESET}")
     print(f"       {C_WHITE}• Tài khoản : {C_PURPLE}{display_name}{C_RESET}")
     print(f"       {C_WHITE}• Join Game : {C_CYAN}{game_id}{C_RESET}")
     
-    # Fix triệt để lỗi unknown command 'force-stop' bằng cách dùng am force-stop chuẩn Android
     os.system(f"am force-stop {pkg} 2>/dev/null || su -c 'am force-stop {pkg}'")
     time.sleep(2)
     
@@ -144,10 +152,10 @@ def launch_package_tab(pkg, game_id, acc_info=None):
         if ticket:
             url = f"roblox://placeId={game_id}&ticket={ticket}"
             os.system(f'am start -p {pkg} -a android.intent.action.VIEW -d "{url}" > /dev/null 2>&1')
-            print(f"{C_GREEN}{C_BOLD}  [✔] ĐÃ ĐĂNG NHẬP COOKIE & JOIN GAME ID {game_id} THÀNH CÔNG!{C_RESET}")
+            print(f"{C_GREEN}{C_BOLD}  [✔] ĐÃ GỬI VÉ COOKIE & JOIN GAME ID {game_id} THÀNH CÔNG!{C_RESET}")
             return
         else:
-            print(f"{C_RED}  [⚠] Cookie bị lỗi/hết hạn, chuyển sang mở trực tiếp Game ID...{C_RESET}")
+            print(f"{C_RED}  [⚠] Không lấy được Ticket từ Cookie! Đang mở trực tiếp App...{C_RESET}")
 
     url_direct = f"roblox://placeId={game_id}"
     os.system(f'am start -p {pkg} -a android.intent.action.VIEW -d "{url_direct}" > /dev/null 2>&1')
@@ -157,7 +165,7 @@ def run_auto_rejoin(cfg):
     active_pkgs = [p["pkg"] for p in cfg.get("packages", []) if p.get("active", True)]
     if not active_pkgs:
         print(f"\n{C_RED}{C_BOLD}  [!] BẠN CHƯA CHỌN PACKAGE NÀO ĐỂ CHẠY!{C_RESET}")
-        print(f"{C_YELLOW}  ➔ Hãy vào mục [2] để quét và BẬT các Package cần chạy trên CloudPhone.{C_RESET}")
+        print(f"{C_YELLOW}  ➔ Hãy vào mục [2] để BẬT các Package cần chạy trên CloudPhone.{C_RESET}")
         time.sleep(3)
         return
 
@@ -176,7 +184,7 @@ def run_auto_rejoin(cfg):
         launch_package_tab(pkg, cfg["game_id"], acc_map.get(pkg))
         time.sleep(6)
 
-    print(f"\n{C_GREEN}{C_BOLD}  [⚡] ĐÃ KHỞI ĐỘNG XONG TẤT CẢ TAB! BẮT ĐẦU GIÁM SÁT TỰ ĐỘNG...{C_RESET}")
+    print(f"\n{C_GREEN}{C_BOLD}  [⚡] ĐÃ KHỞI ĐỘNG XONG! BẮT ĐẦU GIÁM SÁT TỰ ĐỘNG...{C_RESET}")
     print(f"{C_YELLOW}  (Nhấn tổ hợp phím Ctrl + C để dừng và quay về Menu chính){C_RESET}\n")
     
     try:
@@ -217,7 +225,6 @@ while True:
     active_count = sum(1 for p in pkgs_list if p.get("active", True))
     cpu_usage, ram_usage = get_system_stats()
     
-    # --- GIAO DIỆN MENU SIÊU LỚN (78 KÝ TỰ) KÈM % CPU & RAM ---
     print(f"{C_CYAN}{C_BOLD}╔════════════════════════════════════════════════════════════════════════════╗{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║                                                                            ║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║               ⚡  BAOTUE REJOIN PRO - CLOUDPHONE EDITION  ⚡               ║{C_RESET}")
@@ -234,7 +241,7 @@ while True:
     print(f"\n{C_CYAN}{C_BOLD}   ══════════════════════════[ BẢNG ĐIỀU KHIỂN CHÍNH ]══════════════════════════{C_RESET}\n")
     print(f"      {C_GREEN}{C_BOLD}[1]{C_RESET}   🚀   {C_WHITE}{C_BOLD}KHỞI ĐỘNG TẤT CẢ TAB ĐÃ SET & CHẠY AUTO-REJOIN{C_RESET}\n")
     print(f"      {C_GREEN}{C_BOLD}[2]{C_RESET}   📦   {C_WHITE}{C_BOLD}SET PACKAGE & CHỌN PACKAGE CHẠY TRÊN CLOUDPHONE{C_RESET}\n")
-    print(f"      {C_GREEN}{C_BOLD}[3]{C_RESET}   🍪   {C_WHITE}{C_BOLD}NHẬP COOKIE & GẮN TÀI KHOẢN VÀO PACKAGE{C_RESET}\n")
+    print(f"      {C_GREEN}{C_BOLD}[3]{C_RESET}   🍪   {C_WHITE}{C_BOLD}NHẬP NHIỀU COOKIE HÀNG LOẠT & GẮN VÀO PACKAGE{C_RESET}\n")
     print(f"      {C_GREEN}{C_BOLD}[4]{C_RESET}   ⚙️    {C_WHITE}{C_BOLD}CÀI ĐẶT ID GAME & THỜI GIAN QUÉT (DELAY){C_RESET}\n")
     print(f"      {C_GREEN}{C_BOLD}[5]{C_RESET}   🛑   {C_WHITE}{C_BOLD}KILL TOÀN BỘ TAB ROBLOX NGAY LẬP TỨC{C_RESET}\n")
     print(f"      {C_GREEN}{C_BOLD}[6]{C_RESET}   📊   {C_WHITE}{C_BOLD}KIỂM TRA TRẠNG THÁI IN-GAME (THEO PACKAGE ĐÃ SET){C_RESET}\n")
@@ -265,11 +272,11 @@ while True:
                     linked_acc = f"{C_CYAN}(Nick: {acc_map[item['pkg']]}){C_RESET}" if item['pkg'] in acc_map else f"{C_DIM}(Chưa gắn Cookie){C_RESET}"
                     print(f"     {C_YELLOW}{C_BOLD}[{i+1}]{C_RESET}  {status_tag}  {C_WHITE}{C_BOLD}{item['pkg']:<28}{C_RESET} {linked_acc}\n")
             else:
-                print(f"     {C_RED}(Chưa có package nào trong danh sách - Hãy bấm phím A để quét){C_RESET}\n")
+                print(f"     {C_RED}(Chưa có package nào - Hãy bấm phím A để quét){C_RESET}\n")
 
             print(f"{C_CYAN}──────────────────────────────────────────────────────────────────────────────{C_RESET}\n")
             print(f"     {C_GREEN}{C_BOLD}[A]{C_RESET}  Quét tất cả Client (Delta, Arceus, Clone...) trên máy\n")
-            print(f"     {C_GREEN}{C_BOLD}[D]{C_RESET}  Hiển thị TOÀN BỘ ứng dụng trên máy (nếu quét tự động sót)\n")
+            print(f"     {C_GREEN}{C_BOLD}[D]{C_RESET}  Hiển thị TOÀN BỘ ứng dụng trên máy\n")
             print(f"     {C_GREEN}{C_BOLD}[B]{C_RESET}  Bật TẤT CẢ Package      |      {C_RED}{C_BOLD}[C]{C_RESET}  Tắt TẤT CẢ Package\n")
             print(f"     {C_YELLOW}{C_BOLD}[Số STT]{C_RESET}  Nhập số (vd: 1 hoặc 1,2) để Bật/Tắt nhanh      |      {C_RED}{C_BOLD}[0]{C_RESET}  Quay lại\n")
             
@@ -282,7 +289,7 @@ while True:
                 print(f"\n{C_GREEN}{C_BOLD}  [+] TÌM THẤY {len(detected)} GÓI ỨNG DỤNG:{C_RESET}\n")
                 for idx, p in enumerate(detected):
                     print(f"      {C_YELLOW}{C_BOLD}[{idx+1}]{C_RESET}  {C_WHITE}{C_BOLD}{p}{C_RESET}")
-                inp = input(f"\n{C_CYAN}{C_BOLD}  ➔ Nhập STT muốn thêm (vd: 1,2,3 hoặc 'all' hoặc nhập tên): {C_RESET}").strip()
+                inp = input(f"\n{C_CYAN}{C_BOLD}  ➔ Nhập STT muốn thêm (vd: 1,2,3 hoặc 'all'): {C_RESET}").strip()
                 existing_names = [x["pkg"] for x in saved_pkgs]
                 
                 if inp.lower() == "all":
@@ -322,7 +329,7 @@ while True:
     elif choice == "3":
         os.system("clear")
         print(f"{C_CYAN}{C_BOLD}╔════════════════════════════════════════════════════════════════════════════╗{C_RESET}")
-        print(f"{C_CYAN}{C_BOLD}║                   NHẬP COOKIE & GẮN TÀI KHOẢN ROBLOX                       ║{C_RESET}")
+        print(f"{C_CYAN}{C_BOLD}║              NHẬP NHIỀU COOKIE HÀNG LOẠT VÀO CÁC PACKAGE                   ║{C_RESET}")
         print(f"{C_CYAN}{C_BOLD}╚════════════════════════════════════════════════════════════════════════════╝{C_RESET}\n")
         saved_pkgs = cfg.get("packages", [])
         if not saved_pkgs:
@@ -330,31 +337,60 @@ while True:
             input(f"\n{C_DIM}  Bấm Enter để quay lại...{C_RESET}")
             continue
             
-        print(f"{C_GREEN}{C_BOLD}  CHỌN PACKAGE ĐỂ GẮN TÀI KHOẢN:{C_RESET}\n")
+        print(f"{C_GREEN}{C_BOLD}  DANH SÁCH PACKAGE HIỆN CÓ TRÊN MÁY:{C_RESET}\n")
         for i, item in enumerate(saved_pkgs):
             acc_match = next((a["name"] for a in cfg["accounts"] if a["pkg"] == item["pkg"]), "Chưa gắn nick")
             print(f"     {C_YELLOW}{C_BOLD}[{i+1}]{C_RESET}  {C_WHITE}{C_BOLD}{item['pkg']:<30}{C_RESET} {C_PURPLE}(Hiện tại: {acc_match}){C_RESET}\n")
             
-        pkg_sel = input(f"{C_CYAN}{C_BOLD}  ➔ Chọn số thứ tự Package: {C_RESET}").strip()
-        if pkg_sel.isdigit() and 1 <= int(pkg_sel) <= len(saved_pkgs):
-            target_pkg = saved_pkgs[int(pkg_sel)-1]["pkg"]
-        else:
-            print(f"{C_RED}{C_BOLD}  [!] Lựa chọn không hợp lệ!{C_RESET}")
-            time.sleep(1.5)
-            continue
-            
-        ck = input(f"\n{C_CYAN}{C_BOLD}  ➔ Dán chuỗi Cookie (.ROBLOSECURITY): {C_RESET}").strip()
-        print(f"\n{C_YELLOW}{C_BOLD}  [⏳] Đang xác thực Cookie với máy chủ Roblox...{C_RESET}")
-        uid, uname = verify_cookie(ck)
+        print(f"{C_CYAN}──────────────────────────────────────────────────────────────────────────────{C_RESET}")
+        print(f"  {C_YELLOW}HƯỚNG DẪN NHẬP HÀNG LOẠT:{C_RESET}")
+        print(f"  Bạn có thể dán danh sách nhiều Cookie (mỗi dòng 1 cookie).")
+        print(f"  Tool sẽ tự động ghép lần lượt các Cookie vào danh sách Package theo thứ tự từ trên xuống dưới.\n")
         
-        if uid:
-            cfg["accounts"] = [a for a in cfg["accounts"] if a["pkg"] != target_pkg]
-            cfg["accounts"].append({"name": uname, "uid": uid, "pkg": target_pkg, "cookie": ck})
-            save_cfg(cfg)
-            print(f"\n{C_GREEN}{C_BOLD}  [✔ THÀNH CÔNG] Đã gắn nick {C_PURPLE}{uname}{C_GREEN} (ID: {uid}) vào {target_pkg}!{C_RESET}")
-        else:
-            print(f"\n{C_RED}{C_BOLD}  [❌ LỖI] Cookie không hợp lệ hoặc đã chết!{C_RESET}")
-        input(f"\n{C_DIM}  Bấm Enter để quay lại menu...{C_RESET}")
+        print(f"{C_CYAN}{C_BOLD}  ➔ Dán danh sách Cookie vào bên dưới (Nhấn Enter 2 lần hoặc gõ 'END' ở dòng cuối để kết thúc):{C_RESET}")
+        
+        lines = []
+        while True:
+            try:
+                line = input()
+                if line.strip().upper() == "END":
+                    break
+                if not line.strip():
+                    break
+                lines.append(line.strip())
+            except EOFError:
+                break
+                
+        # Lọc ra các chuỗi có chứa định dạng cookie hoặc dài
+        raw_cookies = []
+        for l in lines:
+            if "_|WARNING" in l or ".ROBLOSECURITY" in l or len(l) > 50:
+                raw_cookies.append(l)
+
+        if not raw_cookies:
+            # Nếu nhập theo kiểu dán chung 1 dòng hoặc cách nhau
+            raw_cookies = [c.strip() for c in "".join(lines).split() if len(c) > 50]
+
+        print(f"\n{C_YELLOW}  [⏳] Đang xử lý và xác thực {len(raw_cookies)} Cookie với Roblox...{C_RESET}")
+        
+        success_count = 0
+        for idx, raw_ck in enumerate(raw_cookies):
+            if idx >= len(saved_pkgs):
+                print(f"{C_RED}  [!] Số lượng cookie nhiều hơn số lượng Package hiện có! Bỏ qua các cookie thừa.{C_RESET}")
+                break
+            target_pkg = saved_pkgs[idx]["pkg"]
+            uid, uname, valid_ck = verify_cookie(raw_ck)
+            if uid:
+                cfg["accounts"] = [a for a in cfg["accounts"] if a["pkg"] != target_pkg]
+                cfg["accounts"].append({"name": uname, "uid": uid, "pkg": target_pkg, "cookie": valid_ck})
+                print(f"  {C_GREEN}[✔] Gắn thành công: {C_PURPLE}{uname}{C_GREEN} ➔ {target_pkg}{C_RESET}")
+                success_count += 1
+            else:
+                print(f"  {C_RED}[✖] Cookie thứ {idx+1} không hợp lệ hoặc đã chết, bỏ qua.{C_RESET}")
+                
+        save_cfg(cfg)
+        print(f"\n{C_GREEN}{C_BOLD}  [✔ HOÀN TẤT] Đã gán thành công {success_count} tài khoản vào các Package!{C_RESET}")
+        input(f"\n{C_DIM}  Bấm Enter để quay lại Menu chính...{C_RESET}")
         
     elif choice == "4":
         os.system("clear")
@@ -366,7 +402,7 @@ while True:
         if gid: cfg["game_id"] = gid
         if dl.isdigit(): cfg["delay"] = int(dl)
         save_cfg(cfg)
-        print(f"\n{C_GREEN}{C_BOLD}  [✔] ĐÃ CẬP NHẬT ID GAME & CẤU HÌNH THÀNH CÔNG!{C_RESET}")
+        print(f"\n{C_GREEN}{C_BOLD}  [✔] ĐÃ CẬP NHẬT CẤU HÌNH THÀNH CÔNG!{C_RESET}")
         time.sleep(1.5)
         
     elif choice == "5":
@@ -443,4 +479,3 @@ while True:
         os.system("clear")
         print(f"{C_CYAN}{C_BOLD}Hẹn gặp lại bạn!{C_RESET}")
         break
- 
