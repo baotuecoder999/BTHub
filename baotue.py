@@ -5,7 +5,16 @@ import requests
 
 CFG_PATH = "/sdcard/Download/baotue_config.json"
 
-G, R, Y, C, W = "\033[92m", "\033[91m", "\033[93m", "\033[96m", "\033[0m"
+# --- BẢNG MÀU & ĐỊNH DẠNG ANSI ---
+C_CYAN = "\033[96m"
+C_GREEN = "\033[92m"
+C_YELLOW = "\033[93m"
+C_RED = "\033[91m"
+C_PURPLE = "\033[95m"
+C_BLUE = "\033[94m"
+C_BOLD = "\033[1m"
+C_DIM = "\033[2m"
+C_RESET = "\033[0m"
 
 def load_cfg():
     if os.path.exists(CFG_PATH):
@@ -61,111 +70,172 @@ def get_auth_ticket(cookie):
         return None
 
 def launch_tab(pkg, game_id, cookie, username):
-    print(f"{Y}[BAOTUE] Dang kill & khoi dong lai {username} ({pkg})...{W}")
+    print(f"{C_YELLOW}[⏳] Đang làm mới & khởi chạy cho: {C_BOLD}{username}{C_RESET} {C_DIM}({pkg}){C_RESET}")
     os.system(f"am force-stop {pkg}")
     time.sleep(2)
     ticket = get_auth_ticket(cookie)
     if not ticket:
-        print(f"{R}[BAOTUE] Loi: Cookie cua {username} da het han!{W}")
+        print(f"{C_RED}[❌] Lỗi: Cookie của {username} đã hết hạn hoặc không hợp lệ!{C_RESET}")
         return
     url = f"roblox://placeId={game_id}&ticket={ticket}"
     os.system(f'am start -n {pkg}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d "{url}" > /dev/null 2>&1')
-    print(f"{G}[BAOTUE] Da gui lenh vao Game ID {game_id} cho {username}!{W}")
+    print(f"{C_GREEN}[✔] Đã gửi lệnh vào Game ID {game_id} thành công!{C_RESET}")
 
 def run_auto_rejoin(cfg):
     if not cfg["accounts"]:
-        print(f"{R}[!] Chua co tai khoan nao! Chon muc [2] de setup.{W}")
+        print(f"\n{C_RED}[!] Danh sách tài khoản trống! Vui lòng thêm tài khoản ở mục [2].{C_RESET}")
         time.sleep(2)
         return
-    print(f"{C}[BAOTUE] Khoi dong toan bo tab lan dau...{W}")
+    
+    os.system("clear")
+    print(f"{C_CYAN}╔════════════════════════════════════════════╗{C_RESET}")
+    print(f"{C_CYAN}║{C_BOLD}       HỆ THỐNG AUTO-REJOIN ĐANG CHẠY       {C_RESET}{C_CYAN}║{C_RESET}")
+    print(f"{C_CYAN}╚════════════════════════════════════════════╝{C_RESET}")
+    print(f"{C_YELLOW}[*] Game ID Mục tiêu : {C_BOLD}{cfg['game_id']}{C_RESET}")
+    print(f"{C_YELLOW}[*] Thời gian quét   : {C_BOLD}{cfg.get('delay', 20)} giây/lần{C_RESET}")
+    print(f"{C_DIM}--------------------------------------------{C_RESET}")
+
+    print(f"{C_PURPLE}[🚀] Đang khởi động toàn bộ các tab lần đầu...{C_RESET}")
     for acc in cfg["accounts"]:
         launch_tab(acc["pkg"], cfg["game_id"], acc["cookie"], acc["name"])
-        time.sleep(8)
+        time.sleep(6)
 
-    print(f"{G}[BAOTUE] Dang giam sat Auto-Rejoin (Nhan Ctrl+C de dung)...{W}")
+    print(f"\n{C_GREEN}{C_BOLD}[⚡] ĐÃ KÍCH HOẠT CHẾ ĐỘ GIÁM SÁT TỰ ĐỘNG!{C_RESET}")
+    print(f"{C_DIM}(Nhấn tổ hợp phím Ctrl + C trên bàn phím bất cứ lúc nào để dừng lại){C_RESET}\n")
+    
     try:
         while True:
+            print(f"{C_DIM}--------------------------------------------{C_RESET}")
+            print(f"{C_CYAN}[⏰ Kiểm tra lúc: {time.strftime('%H:%M:%S')}]{C_RESET}")
             for acc in cfg["accounts"]:
                 pid = os.popen(f"pidof {acc['pkg']}").read().strip()
                 ingame = is_in_game(acc["uid"])
+                
                 if not pid or not ingame:
-                    print(f"{R}[!] {acc['name']} mat ket noi (App:{bool(pid)} | InGame:{ingame}) -> Rejoin!{W}")
+                    status_reason = "Mất tiến trình App" if not pid else "Bị văng khỏi Game (Sảnh/Disconnect)"
+                    print(f"{C_RED}[⚠ PHÁT HIỆN VĂNG] {acc['name']} -> Lý do: {status_reason}! Đang Rejoin...{C_RESET}")
                     launch_tab(acc["pkg"], cfg["game_id"], acc["cookie"], acc["name"])
-                    time.sleep(10)
+                    time.sleep(8)
                 else:
-                    print(f"{G}[OK] {acc['name']} ({acc['pkg']}) dang hoat dong on dinh.{W}")
+                    print(f"{C_GREEN}[✔ ONLINE] {acc['name']} {C_DIM}({acc['pkg']}) -> Đang cày ổn định trong Game.{C_RESET}")
+            
             time.sleep(cfg.get("delay", 20))
     except KeyboardInterrupt:
-        print(f"\n{Y}[BAOTUE] Da dung giam sat.{W}")
+        print(f"\n{C_YELLOW}[!] Đã dừng chế độ Auto-Rejoin theo yêu cầu của bạn.{C_RESET}")
+        time.sleep(1.5)
 
 while True:
     os.system("clear")
     cfg = load_cfg()
-    print(f"{C}============================================")
-    print(f"       TOOLS REJOIN ROBLOX - BAOTUE         ")
-    print(f"============================================{W}")
-    print(f"{Y}Game ID:{W} {cfg['game_id']} | {Y}Delay:{W} {cfg.get('delay', 20)}s | {Y}Tabs:{W} {len(cfg['accounts'])}")
-    print(f"{C}--------------------------------------------{W}")
-    print(f"{G}[1]{W} Bat dau Auto-Rejoin (Tat ca Tab)")
-    print(f"{G}[2]{W} Quet Package & Them Cookie tai khoan")
-    print(f"{G}[3]{W} Cai dat ID Game & Thoi gian quet (Delay)")
-    print(f"{G}[4]{W} Kill tat ca Tab Roblox ngay lap tuc")
-    print(f"{G}[5]{W} Kiem tra danh sach & Trang thai In-Game")
-    print(f"{G}[6]{W} Xoa tai khoan (Theo STT hoac Xoa het)")
-    print(f"{R}[0]{W} Thoat Tool")
-    choice = input(f"{C}\n>>> Nhap lua chon: {W}").strip()
+    
+    # --- GIAO DIỆN BANNER HOÀNH TRÁNG ---
+    print(f"{C_CYAN}╔════════════════════════════════════════════════════╗{C_RESET}")
+    print(f"{C_CYAN}║{C_BOLD}{C_PURPLE}             ⚡ BAOTUE REJOIN PRO V10 ⚡             {C_RESET}{C_CYAN}║{C_RESET}")
+    print(f"{C_CYAN}║{C_DIM}        Hệ Thống Quản Lý & Tự Động Rejoin Roblox    {C_RESET}{C_CYAN}║{C_RESET}")
+    print(f"{C_CYAN}╠════════════════════════════════════════════════════╣{C_RESET}")
+    print(f"{C_CYAN}║{C_RESET} {C_YELLOW}Game ID Hiện Tại :{C_RESET} {C_BOLD}{cfg['game_id']:<26}{C_RESET}{C_CYAN}║{C_RESET}")
+    print(f"{C_CYAN}║{C_RESET} {C_YELLOW}Thời Gian Delay  :{C_RESET} {C_BOLD}{str(cfg.get('delay', 20)) + ' giây':<26}{C_RESET}{C_CYAN}║{C_RESET}")
+    print(f"{C_CYAN}║{C_RESET} {C_YELLOW}Tổng Số Tab Lưu  :{C_RESET} {C_BOLD}{str(len(cfg['accounts'])) + ' tài khoản':<26}{C_RESET}{C_CYAN}║{C_RESET}")
+    print(f"{C_CYAN}╚════════════════════════════════════════════════════╝{C_RESET}")
+    
+    print(f"\n{C_BOLD}   CHỌN CHỨC NĂNG HỆ THỐNG:{C_RESET}")
+    print(f"   {C_GREEN}[1]{C_RESET} 🚀 Khởi động tất cả tab & Chạy Auto-Rejoin")
+    print(f"   {C_GREEN}[2]{C_RESET} 📥 Tự động quét Package & Thêm Cookie tài khoản")
+    print(f"   {C_GREEN}[3]{C_RESET} ⚙️  Cài đặt ID Game & Thời gian quét (Delay)")
+    print(f"   {C_GREEN}[4]{C_RESET} 🛑 Kill toàn bộ tab Roblox ngay lập tức")
+    print(f"   {C_GREEN}[5]{C_RESET} 📊 Kiểm tra danh sách & Trạng thái In-Game chi tiết")
+    print(f"   {C_GREEN}[6]{C_RESET} 🗑️  Xóa tài khoản (Xóa lẻ theo STT hoặc Xóa sạch)")
+    print(f"   {C_RED}[0]{C_RESET} 🚪 Thoát chương trình")
+    
+    choice = input(f"\n{C_CYAN}   ➜ Nhập lựa chọn của bạn [0-6]: {C_RESET}").strip()
 
     if choice == "1":
         run_auto_rejoin(cfg)
     elif choice == "2":
+        os.system("clear")
+        print(f"{C_CYAN}=== THÊM TÀI KHOẢN MỚI (QUÉT PACKAGE) ==={C_RESET}")
         pkgs = scan_packages()
         if pkgs:
-            print(f"{G}[+] Cac goi Roblox tim thay tren may:{W}")
+            print(f"{C_GREEN}[+] Tìm thấy các bản Roblox/Clone trên máy bạn:{C_RESET}")
             for i, p in enumerate(pkgs):
-                print(f"  {i+1}. {p}")
-            sel = input("Chon STT package (hoac nhap ten package): ").strip()
+                print(f"    {C_YELLOW}[{i+1}]{C_RESET} {p}")
+            sel = input(f"\n{C_CYAN}➔ Chọn số thứ tự package (hoặc nhập tên tùy chỉnh): {C_RESET}").strip()
             pkg = pkgs[int(sel)-1] if sel.isdigit() and 1 <= int(sel) <= len(pkgs) else sel
         else:
-            pkg = input("Nhap ten Package (vd: com.roblox.client): ").strip()
-        ck = input("Dan Cookie (.ROBLOSECURITY): ").strip()
+            pkg = input(f"{C_YELLOW}➔ Không quét thấy tự động, hãy nhập tên Package (vd: com.roblox.client): {C_RESET}").strip()
+        
+        ck = input(f"{C_CYAN}➔ Dán chuỗi Cookie (.ROBLOSECURITY): {C_RESET}").strip()
+        print(f"{C_YELLOW}[⏳] Đang xác thực Cookie với máy chủ Roblox...{C_RESET}")
         uid, uname = verify_cookie(ck)
+        
         if uid:
             cfg["accounts"] = [a for a in cfg["accounts"] if a["pkg"] != pkg]
             cfg["accounts"].append({"name": uname, "uid": uid, "pkg": pkg, "cookie": ck})
             save_cfg(cfg)
-            print(f"{G}[+] Da luu {uname} (ID: {uid}) -> {pkg}!{W}")
+            print(f"\n{C_GREEN}[✔ THÀNH CÔNG] Đã lưu tài khoản: {C_BOLD}{uname}{C_RESET} {C_GREEN}(ID: {uid}) vào package {pkg}!{C_RESET}")
         else:
-            print(f"{R}[!] Cookie khong hop le hoac da het han!{W}")
-        time.sleep(2)
+            print(f"\n{C_RED}[❌ LỖI] Cookie không hợp lệ hoặc đã hết hạn. Vui lòng kiểm tra lại!{C_RESET}")
+        input(f"\n{C_DIM}Bấm Enter để quay lại menu chính...{C_RESET}")
+        
     elif choice == "3":
-        gid = input(f"Nhap ID Game moi (Enter giu nguyen {cfg['game_id']}): ").strip()
-        dl = input(f"Nhap Delay giay (Enter giu nguyen {cfg.get('delay', 20)}): ").strip()
+        os.system("clear")
+        print(f"{C_CYAN}=== CÀI ĐẶT THÔNG SỐ HỆ THỐNG ==={C_RESET}")
+        gid = input(f"{C_YELLOW}➔ Nhập ID Game mới (Enter để giữ nguyên [{cfg['game_id']}]): {C_RESET}").strip()
+        dl = input(f"{C_YELLOW}➔ Nhập thời gian Delay quét giây (Enter để giữ nguyên [{cfg.get('delay', 20)}]s): {C_RESET}").strip()
+        
         if gid: cfg["game_id"] = gid
         if dl.isdigit(): cfg["delay"] = int(dl)
         save_cfg(cfg)
-        print(f"{G}[+] Da cap nhat cau hinh!{W}")
+        print(f"\n{C_GREEN}[✔] Đã cập nhật cấu hình thành công!{C_RESET}")
         time.sleep(1.5)
+        
     elif choice == "4":
+        os.system("clear")
+        print(f"{C_YELLOW}[⏳] Đang tiến hành ép dừng toàn bộ các tab Roblox...{C_RESET}")
         for a in cfg["accounts"]:
             os.system(f"am force-stop {a['pkg']}")
-        print(f"{Y}[!] Da kill toan bo tab Roblox!{W}")
-        time.sleep(1.5)
+        print(f"{C_GREEN}[✔] Đã đóng tất cả các tiến trình Roblox thành công!{C_RESET}")
+        input(f"\n{C_DIM}Bấm Enter để quay lại menu chính...{C_RESET}")
+        
     elif choice == "5":
+        os.system("clear")
+        print(f"{C_CYAN}╔════════════════════════════════════════════════════╗{C_RESET}")
+        print(f"{C_CYAN}║{C_BOLD}         KIỂM TRA TRẠNG THÁI TAB TRỰC TUYẾN          {C_RESET}{C_CYAN}║{C_RESET}")
+        print(f"{C_CYAN}╚════════════════════════════════════════════════════╝{C_RESET}")
+        if not cfg["accounts"]:
+            print(f"{C_RED}  (Chưa có tài khoản nào được lưu trong danh sách){C_RESET}")
         for i, a in enumerate(cfg["accounts"]):
             pid = os.popen(f"pidof {a['pkg']}").read().strip()
             ig = is_in_game(a["uid"])
-            print(f"{i+1}. {a['name']} | {a['pkg']} -> App: {G+'ON'+W if pid else R+'OFF'+W} | Game: {G+'IN-GAME'+W if ig else R+'DISCONNECT'+W}")
-        input("\nNhan Enter de quay lai...")
+            app_status = f"{C_GREEN}RUNNING (PID: {pid}){C_RESET}" if pid else f"{C_RED}CLOSED{C_RESET}"
+            game_status = f"{C_GREEN}🎮 IN-GAME{C_RESET}" if ig else f"{C_RED}❌ DISCONNECTED{C_RESET}"
+            print(f"  {C_BOLD}[{i+1}]{C_RESET} {C_YELLOW}{a['name']}{C_RESET}")
+            print(f"      Package : {a['pkg']}")
+            print(f"      App     : {app_status}")
+            print(f"      Trạng thái: {game_status}")
+            print(f"  {C_DIM}------------------------------------------------{C_RESET}")
+        input(f"\n{C_CYAN}Bấm Enter để quay lại menu chính...{C_RESET}")
+        
     elif choice == "6":
+        os.system("clear")
+        print(f"{C_CYAN}=== QUẢN LÝ / XÓA TÀI KHOẢN ==={C_RESET}")
+        if not cfg["accounts"]:
+            print(f"{C_RED}Danh sách trống!{C_RESET}")
+            time.sleep(1.5)
+            continue
         for i, a in enumerate(cfg["accounts"]):
-            print(f"{i+1}. {a['name']} ({a['pkg']})")
-        x = input("Nhap STT can xoa (hoac go 'all'): ").strip()
-        if x == "all":
+            print(f"  [{i+1}] {a['name']} ({a['pkg']})")
+        x = input(f"\n{C_YELLOW}➔ Nhập số thứ tự cần xóa (hoặc gõ chữ 'all' để xóa toàn bộ): {C_RESET}").strip()
+        if x.lower() == "all":
             cfg["accounts"] = []
+            print(f"{C_GREEN}[✔] Đã xóa toàn bộ danh sách tài khoản!{C_RESET}")
         elif x.isdigit() and 1 <= int(x) <= len(cfg["accounts"]):
-            cfg["accounts"].pop(int(x)-1)
+            removed = cfg["accounts"].pop(int(x)-1)
+            print(f"{C_GREEN}[✔] Đã xóa tài khoản: {removed['name']}!{C_RESET}")
         save_cfg(cfg)
-        print(f"{Y}[+] Da xoa!{W}")
-        time.sleep(1)
+        time.sleep(1.5)
+        
     elif choice == "0":
+        os.system("clear")
+        print(f"{C_CYAN}Cảm ơn bạn đã sử dụng tools BAOTUE. Hẹn gặp lại!{C_RESET}")
         break
