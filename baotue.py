@@ -489,4 +489,3 @@ while True:
     elif choice == "0":
         os.system("clear")
         print(f"{C_CYAN}{C_BOLD}Hẹn gặp lại bạn!{C_RESET}")
-        break
