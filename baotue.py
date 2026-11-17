@@ -136,31 +136,43 @@ def get_auth_ticket(cookie):
 
 def launch_package_tab(pkg, game_id, acc_info=None):
     display_name = acc_info["name"] if acc_info else "Chưa gắn Cookie"
-    print(f"\n{C_YELLOW}{C_BOLD}  [⏳] ĐANG KÍCH HOẠT TAB: {pkg}{C_RESET}")
+    print(f"\n{C_YELLOW}{C_BOLD}  [⏳] ĐANG KHỞI ĐỘNG TAB: {pkg}{C_RESET}")
     print(f"       {C_WHITE}• Tài khoản : {C_PURPLE}{display_name}{C_RESET}")
     print(f"       {C_WHITE}• Join Game : {C_CYAN}{game_id}{C_RESET}")
     
-    # Ép đóng ứng dụng an toàn không cần lệnh su gây lỗi
-    os.system(f"am force-stop {pkg} >/dev/null 2>&1")
+    # Ép đóng ứng dụng trước khi mở mới
+    os.system(f"am force-stop {pkg} 2>/dev/null || su -c 'am force-stop {pkg}'")
     time.sleep(2)
     
-    ticket = None
     if acc_info and acc_info.get("cookie"):
-        ticket = get_auth_ticket(acc_info["cookie"])
+        cookie = acc_info["cookie"]
+        ticket = get_auth_ticket(cookie)
+        
+        # Cơ chế bơm trực tiếp Cookie vào thư mục nội bộ của App (Hỗ trợ các bản mod như Noka, Delta)
+        # Tạo file SharedPreferences hoặc WebView cookies giả lập để app tự nhận diện tài khoản
+        inject_cmd = f"""su -c '
+        mkdir -p /data/data/{pkg}/app_webview/Default/
+        cat << "EOF" > /data/data/{pkg}/app_webview/Default/Cookies
+        # Netscape HTTP Cookie File
+        .roblox.com\tTRUE\t/\tTRUE\t0\t.ROBLOSECURITY\t{cookie}
+        EOF
+        chmod -R 777 /data/data/{pkg}/app_webview/
+        '"""
+        os.system(inject_cmd)
 
-    if ticket:
-        # Gửi URI kèm ticket trực tiếp vào app mod
-        url = f"roblox://placeId={game_id}&ticket={ticket}"
-        os.system(f'am start -p {pkg} -a android.intent.action.VIEW -d "{url}" > /dev/null 2>&1')
-        print(f"{C_GREEN}{C_BOLD}  [✔] ĐÃ GỬI VÉ ĐĂNG NHẬP & JOIN GAME ID {game_id}!{C_RESET}")
-    else:
-        # Phương án dự phòng: Khởi chạy trực tiếp Main Intent của gói ứng dụng nếu không lấy được ticket
-        os.system(f'am start -p {pkg} > /dev/null 2>&1')
-        time.sleep(3)
-        # Sau khi app mở, gửi tiếp lệnh join game id
-        url_game = f"roblox://placeId={game_id}"
-        os.system(f'am start -p {pkg} -a android.intent.action.VIEW -d "{url_game}" > /dev/null 2>&1')
-        print(f"{C_GREEN}{C_BOLD}  [✔] ĐÃ MỞ CLIENT MOD & JOIN GAME ID {game_id}!{C_RESET}")
+        if ticket:
+            # Gửi đồng thời cả URL Ticket và đánh thức Intent của Client Mod
+            url = f"roblox://placeId={game_id}&ticket={ticket}"
+            os.system(f'am start -p {pkg} -a android.intent.action.VIEW -d "{url}" > /dev/null 2>&1')
+            print(f"{C_GREEN}{C_BOLD}  [✔] ĐÃ BƠM COOKIE & GỬI VÉ JOIN GAME ID {game_id}!{C_RESET}")
+            return
+        else:
+            print(f"{C_RED}{C_BOLD}  [⚠] Không lấy được Ticket, đang mở trực tiếp App bằng Cookie nội bộ...{C_RESET}")
+
+    # Mở trực tiếp App nếu không có cookie
+    url_direct = f"roblox://placeId={game_id}"
+    os.system(f'am start -p {pkg} -a android.intent.action.VIEW -d "{url_direct}" > /dev/null 2>&1')
+    print(f"{C_GREEN}{C_BOLD}  [✔] ĐÃ MỞ APP & JOIN THẲNG VÀO GAME ID {game_id}!{C_RESET}")
 
 def run_auto_rejoin(cfg):
     active_pkgs = [p["pkg"] for p in cfg.get("packages", []) if p.get("active", True)]
@@ -408,7 +420,7 @@ while True:
         os.system("clear")
         print(f"{C_YELLOW}{C_BOLD}  [⏳] Đang ép dừng toàn bộ tab Roblox đã set...{C_RESET}")
         for item in cfg.get("packages", []):
-            os.system(f"am force-stop {item['pkg']} >/dev/null 2>&1")
+            os.system(f"am force-stop {item['pkg']} 2>/dev/null || su -c 'am force-stop {item['pkg']}'")
         print(f"\n{C_GREEN}{C_BOLD}  [✔] ĐÃ ĐÓNG XONG TOÀN BỘ TAB!{C_RESET}")
         input(f"\n{C_DIM}  Bấm Enter để quay lại...{C_RESET}")
         
@@ -477,3 +489,4 @@ while True:
     elif choice == "0":
         os.system("clear")
         print(f"{C_CYAN}{C_BOLD}Hẹn gặp lại bạn!{C_RESET}")
+        break
