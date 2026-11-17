@@ -19,7 +19,6 @@ def load_cfg():
     if os.path.exists(CFG_PATH):
         with open(CFG_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
-            # Chuẩn hóa dữ liệu cũ nếu có
             if data.get("packages") and isinstance(data["packages"][0], str):
                 data["packages"] = [{"pkg": p, "active": True} for p in data["packages"]]
             return data
@@ -30,8 +29,25 @@ def save_cfg(data):
         json.dump(data, f, indent=2)
 
 def scan_packages():
-    out = os.popen("pm list packages | grep -i roblox").read().splitlines()
-    return [p.replace("package:", "").strip() for p in out if p.strip()]
+    found = set()
+    # Cách 1: Quét trực tiếp các ứng dụng nhận giao thức roblox:// (Nhận diện mọi bản mod/clone kể cả đổi tên lạ)
+    q_out = os.popen('cmd package query-activities -a android.intent.action.VIEW -d "roblox://" 2>/dev/null').read()
+    for line in q_out.splitlines():
+        line = line.strip()
+        if line.startswith("packageName="):
+            pkg = line.split("=", 1)[1].strip()
+            if pkg:
+                found.add(pkg)
+
+    # Cách 2: Quét bổ sung theo danh sách từ khóa các client phổ biến
+    keywords = ["roblox", "delta", "arceus", "codex", "fluxus", "hydrogen", "vega", "trigon", "evon"]
+    all_pkgs = os.popen("pm list packages -3").read().splitlines()
+    for line in all_pkgs:
+        pkg = line.replace("package:", "").strip()
+        if any(k in pkg.lower() for k in keywords):
+            found.add(pkg)
+
+    return sorted(list(found))
 
 def verify_cookie(cookie):
     try:
@@ -81,7 +97,8 @@ def launch_tab(pkg, game_id, cookie, username):
         print(f"{C_RED}  [❌] Lỗi: Cookie của {username} đã hết hạn hoặc bị lỗi!{C_RESET}")
         return
     url = f"roblox://placeId={game_id}&ticket={ticket}"
-    os.system(f'am start -n {pkg}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d "{url}" > /dev/null 2>&1')
+    # Dùng -p {pkg} kết hợp ActivityProtocolLaunch để mở chuẩn trên mọi bản mod/clone
+    os.system(f'am start -p {pkg} -a android.intent.action.VIEW -d "{url}" > /dev/null 2>&1')
     print(f"{C_GREEN}  [✔] Đã gửi lệnh vào Game ID {game_id} thành công!{C_RESET}")
 
 def run_auto_rejoin(cfg):
@@ -137,7 +154,6 @@ while True:
     pkgs_list = cfg.get("packages", [])
     active_count = sum(1 for p in pkgs_list if p.get("active", True))
     
-    # --- GIAO DIỆN MENU PHÓNG TO (68 KÝ TỰ) ---
     print(f"{C_CYAN}╔══════════════════════════════════════════════════════════════════╗{C_RESET}")
     print(f"{C_CYAN}║{C_BOLD}{C_PURPLE}                 ⚡ BAOTUE REJOIN PRO - CLOUDPHONE ⚡               {C_RESET}{C_CYAN}║{C_RESET}")
     print(f"{C_CYAN}║{C_DIM}           Hệ Thống Tự Động Treo Game & Quản Lý Đa Tài Khoản      {C_RESET}{C_CYAN}║{C_RESET}")
@@ -182,7 +198,8 @@ while True:
                 print(f"    {C_DIM}(Chưa có package nào trong danh sách){C_RESET}")
 
             print(f"\n{C_DIM}────────────────────────────────────────────────────────────────────{C_RESET}")
-            print(f"  {C_GREEN}[A]{C_RESET} Quét & Thêm Package mới từ CloudPhone")
+            print(f"  {C_GREEN}[A]{C_RESET} Quét tất cả Client (Delta, Arceus, Clone...) trên máy")
+            print(f"  {C_GREEN}[D]{C_RESET} Hiển thị TOÀN BỘ ứng dụng đã cài trên máy (nếu quét tự động sót)")
             print(f"  {C_GREEN}[B]{C_RESET} Bật TẤT CẢ các Package đã lưu")
             print(f"  {C_GREEN}[C]{C_RESET} Tắt TẤT CẢ các Package đã lưu")
             print(f"  {C_YELLOW}[Số STT]{C_RESET} Nhập số thứ tự (vd: 1 hoặc 1,2) để Bật/Tắt nhanh")
@@ -191,9 +208,13 @@ while True:
             sub = input(f"\n{C_CYAN}  ➜ Nhập lựa chọn của bạn: {C_RESET}").strip()
             if sub == "0":
                 break
-            elif sub.upper() == "A":
-                detected = scan_packages()
-                print(f"\n{C_GREEN}  [+] Tìm thấy {len(detected)} bản Roblox trên CloudPhone:{C_RESET}")
+            elif sub.upper() in ["A", "D"]:
+                if sub.upper() == "A":
+                    detected = scan_packages()
+                else:
+                    detected = sorted([p.replace("package:", "").strip() for p in os.popen("pm list packages -3").read().splitlines() if p.strip()])
+                
+                print(f"\n{C_GREEN}  [+] Tìm thấy {len(detected)} gói ứng dụng:{C_RESET}")
                 for idx, p in enumerate(detected):
                     print(f"      {C_YELLOW}[{idx+1}]{C_RESET} {p}")
                 inp = input(f"\n{C_CYAN}  ➔ Nhập STT muốn thêm (vd: 1,2,3 hoặc gõ 'all' hoặc nhập tên): {C_RESET}").strip()
@@ -336,5 +357,5 @@ while True:
         
     elif choice == "0":
         os.system("clear")
-        print(f"{C_CYAN}Hẹn gặp lại Babi!{C_RESET}")
+        print(f"{C_CYAN}Hẹn gặp lại bạn!{C_RESET}")
         break
