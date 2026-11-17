@@ -9,6 +9,6 @@ termux-setup-storage
 sleep 2
 
 echo -e "\033[96m[BAOTUE] Dang tai file baotue.py vao /sdcard/Download...\033[0m"
-curl -s -o /sdcard/Download/baotue.py https://raw.githubusercontent.com/USER_GITHUB/BAOTUE-Tool/main/baotue.py
+curl -s -o /sdcard/Download/baotue.py https://raw.githubusercontent.com/baotuecoder999/BTHub/main/baotue.py
 
 echo -e "\033[92m[BAOTUE] Cai dat hoan tat! Hay chay lenh buoc 3 de mo tool.\033[0m"
