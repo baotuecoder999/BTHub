@@ -4,6 +4,7 @@ import json
 import requests
 
 CFG_PATH = "/sdcard/Download/baotue_config.json"
+EXPORT_DIR = "/sdcard/Download/"
 
 # --- BẢNG MÀU & ĐỊNH DẠNG ANSI ---
 C_CYAN = "\033[96m"
@@ -99,31 +100,43 @@ def verify_cookie(cookie):
     return None, None, None
 
 def extract_cookie_from_pkg(pkg):
-    """Trích xuất chuỗi .ROBLOSECURITY từ thư mục lưu trữ dữ liệu bên trong của App bằng quyền root"""
+    """Trích xuất sâu toàn bộ cookie .ROBLOSECURITY từ mọi ngóc ngách dữ liệu của App trên VMOS bằng quyền root"""
     try:
-        # Đường dẫn chứa cookie webview trên Android
-        cookie_file_path = f"/data/data/{pkg}/app_webview/Default/Cookies"
-        cmd = f"su -c 'cat {cookie_file_path} 2>/dev/null'"
-        content = os.popen(cmd).read()
+        # Quét nhị phân toàn bộ thư mục data của app để tìm chuỗi cookie bắt đầu bằng _|WARNING
+        cmd = f"su -c 'grep -rho \"_|WARNING[^\"]*\" /data/data/{pkg}/ 2>/dev/null'"
+        output = os.popen(cmd).read().strip()
         
-        if ".ROBLOSECURITY" in content:
-            for line in content.splitlines():
-                if ".ROBLOSECURITY" in line:
-                    parts = line.strip().split()
-                    for p in parts:
-                        if len(p) > 50 and "_" in p: # Chuỗi cookie roblox thường rất dài và có ký tự đặc biệt
-                            return p
-        
-        # Phương án dự phòng tìm trong các tệp SharedPreferences XML
-        pref_cmd = f"su -c 'grep -rnw \"_|WARNING\" /data/data/{pkg}/ 2>/dev/null'"
-        pref_out = os.popen(pref_cmd).read()
-        if pref_out:
-            for word in pref_out.split():
-                if len(word) > 50 and "_" in word:
-                    return word.strip().strip('"').strip("'")
+        if output:
+            for line in output.splitlines():
+                if len(line.strip()) > 50:
+                    return line.strip().strip('"').strip("'")
+
+        # Phương án dự phòng quét tệp Cookies sqlite / webview
+        cmd2 = f"su -c 'strings /data/data/{pkg}/app_webview/Default/Cookies 2>/dev/null'"
+        out2 = os.popen(cmd2).read()
+        if out2:
+            for line in out2.splitlines():
+                if "_|WARNING" in line or len(line.strip()) > 80:
+                    if "_" in line:
+                        return line.strip().strip('"').strip("'")
     except Exception:
         pass
     return None
+
+def export_cookies_to_zarchiver(accounts):
+    """Xuất file cookies.txt ra thư mục /sdcard/Download/ để mở bằng Zarchiver"""
+    try:
+        os.makedirs(EXPORT_DIR, exist_ok=True)
+        file_path = os.path.join(EXPORT_DIR, "baotue_cookies.txt")
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write("# === BAOTUE REJOIN PRO - EXPORTED COOKIES ===\n")
+            for acc in accounts:
+                f.write(f"# Name: {acc['name']} | ID: {acc['uid']} | Package: {acc['pkg']}\n")
+                f.write(f"{acc['cookie']}\n\n")
+        print(f"\n{C_GREEN}{C_BOLD}  [✔] Đã xuất file cookie thành công tại: {file_path}{C_RESET}")
+        print(f"{C_YELLOW}  ➔ Bạn có thể mở ứng dụng Zarchiver vào mục Download để xem file 'baotue_cookies.txt'.{C_RESET}")
+    except Exception as e:
+        print(f"{C_RED}  [!] Lỗi xuất file: {e}{C_RESET}")
 
 def is_in_game(user_id):
     if not user_id:
@@ -277,7 +290,7 @@ while True:
     print(f"      {C_GREEN}{C_BOLD}[1]{C_RESET}   🚀   {C_WHITE}{C_BOLD}KHỞI ĐỘNG TẤT CẢ TAB ĐÃ SET & CHẠY AUTO-REJOIN{C_RESET}\n")
     print(f"      {C_GREEN}{C_BOLD}[2]{C_RESET}   📦   {C_WHITE}{C_BOLD}SET PACKAGE & CHỌN PACKAGE CHẠY TRÊN CLOUDPHONE{C_RESET}\n")
     print(f"      {C_GREEN}{C_BOLD}[3]{C_RESET}   🍪   {C_WHITE}{C_BOLD}NHẬP NHIỀU COOKIE HÀNG LOẠT & TỰ ĐỘNG LOGIN{C_RESET}\n")
-    print(f"      {C_GREEN}{C_BOLD}[8]{C_RESET}   📥   {C_WHITE}{C_BOLD}GET COOKIE TỪ APP ĐÃ ĐĂNG NHẬP SẴN (TÀI KHOẢN/MẬT KHẨU){C_RESET}\n")
+    print(f"      {C_GREEN}{C_BOLD}[8]{C_RESET}   📥   {C_WHITE}{C_BOLD}GET COOKIE TỪ APP ĐÃ ĐĂNG NHẬP SẴN + XUẤT FILE ZARCHIVER{C_RESET}\n")
     print(f"      {C_GREEN}{C_BOLD}[4]{C_RESET}   ⚙️    {C_WHITE}{C_BOLD}CÀI ĐẶT ID GAME & THỜI GIAN QUÉT (DELAY){C_RESET}\n")
     print(f"      {C_GREEN}{C_BOLD}[5]{C_RESET}   🛑   {C_WHITE}{C_BOLD}KILL TOÀN BỘ TAB ROBLOX NGAY LẬP TỨC{C_RESET}\n")
     print(f"      {C_GREEN}{C_BOLD}[6]{C_RESET}   📊   {C_WHITE}{C_BOLD}KIỂM TRA TRẠNG THÁI IN-GAME (THEO PACKAGE ĐÃ SET){C_RESET}\n")
@@ -428,13 +441,14 @@ while True:
                 print(f"  {C_RED}[✖] Cookie thứ {idx+1} không hợp lệ hoặc đã chết, bỏ qua.{C_RESET}")
                 
         save_cfg(cfg)
+        export_cookies_to_zarchiver(cfg["accounts"])
         print(f"\n{C_GREEN}{C_BOLD}  [✔ HOÀN TẤT] Đã gán và khởi động thành công {success_count} tài khoản!{C_RESET}")
         input(f"\n{C_DIM}  Bấm Enter để quay lại Menu chính...{C_RESET}")
 
     elif choice == "8":
         os.system("clear")
         print(f"{C_CYAN}{C_BOLD}╔════════════════════════════════════════════════════════════════════════════╗{C_RESET}")
-        print(f"{C_CYAN}{C_BOLD}║           TRÍCH XUẤT (GET) COOKIE TỪ CÁC APP ĐÃ ĐĂNG NHẬP SẴN               ║{C_RESET}")
+        print(f"{C_CYAN}{C_BOLD}║           trích xuất (GET) COOKIE TỪ CÁC APP ĐÃ ĐĂNG NHẬP SẴN               ║{C_RESET}")
         print(f"{C_CYAN}{C_BOLD}╚════════════════════════════════════════════════════════════════════════════╝{C_RESET}\n")
         
         saved_pkgs = cfg.get("packages", [])
@@ -443,7 +457,7 @@ while True:
             input(f"\n{C_DIM}  Bấm Enter để quay lại...{C_RESET}")
             continue
             
-        print(f"{C_GREEN}{C_BOLD}  Đang quét dữ liệu Cookie bên trong các Package đã lưu...{C_RESET}\n")
+        print(f"{C_GREEN}{C_BOLD}  Đang quét sâu bộ nhớ trong của các Package đã lưu...{C_RESET}\n")
         extracted_count = 0
         
         for item in saved_pkgs:
@@ -458,11 +472,14 @@ while True:
                     print(f"    {C_GREEN}[✔ LẤY THÀNH CÔNG] Nick: {C_PURPLE}{uname}{C_GREEN} (ID: {uid}) ➔ {pkg}{C_RESET}")
                     extracted_count += 1
                 else:
-                    print(f"    {C_RED}[✖] Tìm thấy cookie trong app nhưng token đã hết hạn.{C_RESET}")
+                    print(f"    {C_RED}[✖] Tìm thấy chuỗi cookie trong app nhưng token đã hết hạn hoặc không hợp lệ.{C_RESET}")
             else:
-                print(f"    {C_RED}[✖] Không tìm thấy dữ liệu đăng nhập trong app này (Có thể chưa đăng nhập tài khoản/mật khẩu).{C_RESET}")
+                print(f"    {C_RED}[✖] Không tìm thấy phiên đăng nhập. (Hãy đảm bảo bạn đã đăng nhập tài khoản/mật khẩu thành công vào app này trước khi Get).{C_RESET}")
                 
         save_cfg(cfg)
+        if extracted_count > 0:
+            export_cookies_to_zarchiver(cfg["accounts"])
+            
         print(f"\n{C_GREEN}{C_BOLD}  [✔ HOÀN TẤT] Đã trích xuất thành công {extracted_count} tài khoản từ các App!{C_RESET}")
         input(f"\n{C_DIM}  Bấm Enter để quay lại Menu chính...{C_RESET}")
         
