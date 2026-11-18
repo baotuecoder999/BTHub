@@ -108,7 +108,10 @@ def is_in_game(user_id):
             timeout=10
         )
         if r.status_code == 200:
-            return r.json()["userPresences"][0]["userPresenceType"] == 2
+            presences = r.json().get("userPresences", [])
+            if presences:
+                # userPresenceType == 2 nghĩa là đang trong game (In-Game)
+                return presences[0].get("userPresenceType") == 2
     except Exception:
         pass
     return False
@@ -134,12 +137,14 @@ def get_auth_ticket(cookie):
     except Exception:
         return None
 
-def launch_package_tab(pkg, game_id, acc_info=None):
+def launch_package_tab(pkg, game_id, acc_info=None, is_rejoin=False):
     display_name = acc_info["name"] if acc_info else "Chưa gắn Cookie"
-    print(f"\n{C_YELLOW}{C_BOLD}  [⏳] ĐANG KÍCH HOẠT VÀ ĐĂNG NHẬP CHO TAB: {pkg}{C_RESET}")
+    action_text = "ĐANG REJOIN LẠI TAB" if is_rejoin else "ĐANG KHỞI ĐỘNG TAB"
+    print(f"\n{C_YELLOW}{C_BOLD}  [⏳] {action_text}: {pkg}{C_RESET}")
     print(f"       {C_WHITE}• Tài khoản : {C_PURPLE}{display_name}{C_RESET}")
     print(f"       {C_WHITE}• Join Game : {C_CYAN}{game_id}{C_RESET}")
     
+    # Chỉ kill và làm mới app khi thực hiện Rejoin hoặc khởi động mới
     os.system(f"am force-stop {pkg} 2>/dev/null || su -c 'am force-stop {pkg}'")
     time.sleep(2)
     
@@ -147,7 +152,7 @@ def launch_package_tab(pkg, game_id, acc_info=None):
         cookie = acc_info["cookie"]
         ticket = get_auth_ticket(cookie)
         
-        # Bơm file cookie trực tiếp vào WebView/Internal Storage của app mod (Noka, Delta...)
+        # Bơm file cookie trực tiếp vào WebView/Internal Storage của app mod
         inject_cmd = f"""su -c '
         mkdir -p /data/data/{pkg}/app_webview/Default/
         cat << "EOF" > /data/data/{pkg}/app_webview/Default/Cookies
@@ -161,10 +166,8 @@ def launch_package_tab(pkg, game_id, acc_info=None):
         if ticket:
             url = f"roblox://placeId={game_id}&ticket={ticket}"
             os.system(f'am start -p {pkg} -a android.intent.action.VIEW -d "{url}" > /dev/null 2>&1')
-            print(f"{C_GREEN}{C_BOLD}  [✔] ĐÃ BƠM COOKIE & LOGIN THÀNH CÔNG VÀO GAME ID {game_id}!{C_RESET}")
+            print(f"{C_GREEN}{C_BOLD}  [✔] ĐÃ BƠM COOKIE & GỬI VÉ JOIN GAME THÀNH CÔNG!{C_RESET}")
             return
-        else:
-            print(f"{C_RED}{C_BOLD}  [⚠] Lấy ticket thất bại, đang mở app bằng cookie nội bộ...{C_RESET}")
 
     url_direct = f"roblox://placeId={game_id}"
     os.system(f'am start -p {pkg} -a android.intent.action.VIEW -d "{url_direct}" > /dev/null 2>&1')
@@ -190,10 +193,10 @@ def run_auto_rejoin(cfg):
     print(f"{C_CYAN}──────────────────────────────────────────────────────────────────────────────{C_RESET}")
 
     for pkg in active_pkgs:
-        launch_package_tab(pkg, cfg["game_id"], acc_map.get(pkg))
+        launch_package_tab(pkg, cfg["game_id"], acc_map.get(pkg), is_rejoin=False)
         time.sleep(6)
 
-    print(f"\n{C_GREEN}{C_BOLD}  [⚡] ĐÃ KHỞI ĐỘNG XONG! BẮT ĐẦU GIÁM SÁT TỰ ĐỘNG...{C_RESET}")
+    print(f"\n{C_GREEN}{C_BOLD}  [⚡] ĐÃ KHỞI ĐỘNG XONG! BẮT ĐẦU GIÁM SÁT TỰ ĐỘNG GIỮ NGUYÊN TAB...{C_RESET}")
     print(f"{C_YELLOW}  (Nhấn tổ hợp phím Ctrl + C để dừng và quay về Menu chính){C_RESET}\n")
     
     try:
@@ -206,21 +209,22 @@ def run_auto_rejoin(cfg):
                 
                 if acc and acc.get("uid"):
                     ingame = is_in_game(acc["uid"])
-                    if not pid or not ingame:
-                        reason = "Tắt ứng dụng" if not pid else "Bị văng khỏi phòng / Mất kết nối"
+                    # Chỉ Rejoin khi tiến trình app chết hẳn HOẶC server báo tài khoản không còn trong game (văng sảnh/disconnect)
+                    if not pid or ingame is False:
+                        reason = "Tiến trình App đã tắt" if not pid else "Bị văng khỏi phòng / Mất kết nối"
                         print(f"{C_RED}{C_BOLD}  [⚠ PHÁT HIỆN VĂNG] {acc['name']} ({pkg}){C_RESET}")
-                        print(f"{C_RED}     ➔ Lý do: {reason} -> Đang tự động Rejoin lại Game {cfg['game_id']}...{C_RESET}")
-                        launch_package_tab(pkg, cfg["game_id"], acc)
+                        print(f"{C_RED}     ➔ Lý do: {reason} -> Đang tự động Rejoin lại...{C_RESET}")
+                        launch_package_tab(pkg, cfg["game_id"], acc, is_rejoin=True)
                         time.sleep(8)
                     else:
-                        print(f"{C_GREEN}{C_BOLD}  [✔ ONLINE] {acc['name']:<18} | {pkg} -> Đang trong Game ổn định{C_RESET}")
+                        print(f"{C_GREEN}{C_BOLD}  [✔ ONLINE] {acc['name']:<18} | {pkg} -> Giữ nguyên tab, đang cày ổn định{C_RESET}")
                 else:
                     if not pid:
                         print(f"{C_RED}{C_BOLD}  [⚠ TẮT APP] {pkg} -> Đang mở lại & Join Game {cfg['game_id']}...{C_RESET}")
-                        launch_package_tab(pkg, cfg["game_id"], None)
+                        launch_package_tab(pkg, cfg["game_id"], None, is_rejoin=True)
                         time.sleep(8)
                     else:
-                        print(f"{C_GREEN}{C_BOLD}  [✔ RUNNING] {pkg} (PID: {pid}) -> App đang chạy ổn định{C_RESET}")
+                        print(f"{C_GREEN}{C_BOLD}  [✔ RUNNING] {pkg} (PID: {pid}) -> Giữ nguyên tab, App đang chạy ổn định{C_RESET}")
             
             time.sleep(cfg.get("delay", 20))
     except KeyboardInterrupt:
@@ -354,7 +358,7 @@ while True:
         print(f"{C_CYAN}──────────────────────────────────────────────────────────────────────────────{C_RESET}")
         print(f"  {C_YELLOW}HƯỚNG DẪN NHẬP & LOGIN TỰ ĐỘNG:{C_RESET}")
         print(f"  - Dán danh sách nhiều Cookie (mỗi dòng 1 cookie).")
-        print(f"  - Tool sẽ tự động gán vào Package, đồng thời **tự động khởi động từng Package** để login vào game ngay lập tức.\n")
+        print(f"  - Tool sẽ tự động gán vào Package và khởi động app để login ngay.\n")
         
         print(f"{C_CYAN}{C_BOLD}  ➔ Dán danh sách Cookie (Gõ 'END' ở dòng cuối để kết thúc):{C_RESET}")
         
@@ -394,10 +398,9 @@ while True:
                 save_cfg(cfg)
                 
                 print(f"  {C_GREEN}[✔] Gắn thành công: {C_PURPLE}{uname}{C_GREEN} ➔ {target_pkg}{C_RESET}")
-                # LOGIC MỚI: Tự động khởi động và login thẳng vào app ngay sau khi nhận cookie thành công
-                launch_package_tab(target_pkg, cfg["game_id"], new_acc)
+                launch_package_tab(target_pkg, cfg["game_id"], new_acc, is_rejoin=False)
                 success_count += 1
-                time.sleep(4) # Nghỉ ngắn giữa các tab để CloudPhone không bị quá tải
+                time.sleep(4)
             else:
                 print(f"  {C_RED}[✖] Cookie thứ {idx+1} không hợp lệ hoặc đã chết, bỏ qua.{C_RESET}")
                 
