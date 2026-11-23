@@ -580,17 +580,16 @@ def _bootstrap_webview_cookies(pkg, cookies_path, user_id=0):
 
 def _sync_native_session_files(pkg, owner, tmp_dir, cookie, acc_info=None, user_id=0):
     """
-    Ghi đồng bộ dữ liệu phiên Native cho tất cả client Roblox (gốc, Delta, Arceus, Codex, clone):
-    1. files/RobloxCookies.dat (Native C++ HTTP Cookie Store)
-    2. files/appData/LocalStorage/appStorage.json (UserId, Username, DisplayName)
-    3. shared_prefs/prefs.xml (userid_long, username, displayName)
+    Ghi đồng bộ dữ liệu phiên Native chuẩn kiểu dữ liệu Android cho tất cả client Roblox:
+    1. files/RobloxCookies.dat & app_webview/Cookies (Netscape HTTP Cookie File)
+    2. files/appData/LocalStorage/appStorage.json
+    3. shared_prefs/prefs.xml (sử dụng đúng kiểu <long name="userid_long" value="..." />)
     """
     base = get_data_dir(pkg, user_id)
     q_def = shlex.quote(f"{base}/app_webview/Default")
     q_db_dir = shlex.quote(f"{base}/databases")
     exec_shell(f"rm -f {q_def}/Cookies-journal {q_def}/Cookies-wal {q_def}/Cookies-shm {q_db_dir}/roblox-database-default*")
 
-    # 1. Ghi RobloxCookies.dat (định dạng Netscape HTTP Cookie File mà Roblox engine đọc)
     exp_ts = int(time.time()) + COOKIE_TTL_DAYS * 86400
     cookie_dat_content = (
         "# Netscape HTTP Cookie File\n"
@@ -602,11 +601,11 @@ def _sync_native_session_files(pkg, owner, tmp_dir, cookie, acc_info=None, user_
     with open(tmp_dat, "w", encoding="utf-8") as f:
         f.write(cookie_dat_content)
     _push_file_as_root(tmp_dat, f"{base}/files/RobloxCookies.dat", owner, "660")
+    _push_file_as_root(tmp_dat, f"{base}/app_webview/Cookies", owner, "660")
 
     uid = str(acc_info.get("uid", "")) if acc_info else ""
     uname = str(acc_info.get("name", "")) if acc_info else ""
 
-    # 2. Cập nhật appStorage.json (giữ nguyên cấu trúc nếu đã tồn tại, chỉ cập nhật thông tin user)
     app_storage_path = f"{base}/files/appData/LocalStorage/appStorage.json"
     tmp_storage = os.path.join(tmp_dir, "appStorage.json")
     storage_data = {}
@@ -629,7 +628,6 @@ def _sync_native_session_files(pkg, owner, tmp_dir, cookie, acc_info=None, user_
             json.dump(storage_data, f, separators=(",", ":"))
         _push_file_as_root(tmp_storage, app_storage_path, owner, "660")
 
-    # 3. Cập nhật shared_prefs/prefs.xml với userid_long, username, displayName
     prefs_path = f"{base}/shared_prefs/prefs.xml"
     tmp_prefs  = os.path.join(tmp_dir, "prefs.xml")
     xml_text = '<?xml version=\'1.0\' encoding=\'utf-8\' standalone=\'yes\' ?>\n<map>\n</map>\n'
@@ -652,7 +650,7 @@ def _sync_native_session_files(pkg, owner, tmp_dir, cookie, acc_info=None, user_
 
     if uid and uname and "</map>" in cleaned_xml:
         inject_tags = (
-            f'    <string name="userid_long">{uid}</string>\n'
+            f'    <long name="userid_long" value="{uid}" />\n'
             f'    <string name="username">{uname}</string>\n'
             f'    <string name="displayName">{uname}</string>\n'
             f'    <boolean name="under13" value="false" />\n'
@@ -726,7 +724,6 @@ def inject_cookie_to_pkg(pkg, cookie, acc_info=None, user_id=0):
         _upsert_roblosecurity_in_db(tmp_db, ck)
         expected_size = os.path.getsize(tmp_db)
 
-        # Đồng bộ đồng thời RobloxCookies.dat, appStorage.json và prefs.xml cho mọi client
         _sync_native_session_files(pkg, owner, tmp_dir, ck, acc_info=acc_info, user_id=user_id)
 
         q_wv  = shlex.quote(webview_dir)
@@ -758,7 +755,7 @@ def inject_cookie_to_pkg(pkg, cookie, acc_info=None, user_id=0):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 def launch_and_join_single_tab(pkg, game_id, acc_info=None, is_rejoin=False, force_inject=False, user_id=0):
-    """Khởi động từng tab riêng lẻ, xác thực bằng Auth Ticket + Cookie và join thẳng vào Game ID."""
+    """Khởi động từng tab riêng lẻ bằng scheme roblox:// chuẩn Android và join thẳng vào Game ID."""
     display_name = acc_info["name"] if acc_info else "Chưa gắn Cookie"
     action_text  = "REJOIN & JOIN GAME" if is_rejoin else "KHỞI ĐỘNG & JOIN GAME"
     cloud_name   = CLOUD_PHONE_PKGS.get(pkg, "")
@@ -776,7 +773,6 @@ def launch_and_join_single_tab(pkg, game_id, acc_info=None, is_rejoin=False, for
     exec_shell(f"am force-stop {user_flag} {q_pkg}")
     time.sleep(1.2)
 
-    ticket = None
     if acc_info and acc_info.get("cookie"):
         cookie      = normalize_cookie(acc_info["cookie"])
         need_inject = force_inject or not is_session_synced(pkg, acc_info.get("uid"), cookie, user_id)
@@ -789,31 +785,11 @@ def launch_and_join_single_tab(pkg, game_id, acc_info=None, is_rejoin=False, for
         else:
             print(f"{C_DIM}  [OK] Phiên đăng nhập đã đồng bộ sẵn cho {pkg}{C_RESET}")
 
-        # Lấy rbx-authentication-ticket để ép mọi client Roblox nhận phiên đăng nhập ngay khi mở
-        ticket = get_auth_ticket(cookie)
-        if ticket:
-            print(f"{C_CYAN}  [OK] Đã lấy Auth Ticket xác thực trực tiếp cho {display_name}{C_RESET}")
-
-    if ticket:
-        launch_time = int(time.time() * 1000)
-        place_url = urllib.parse.quote(
-            f"https://assetgame.roblox.com/game/PlaceLauncher.ashx?request=RequestGame&placeId={game_id}&isPlayTogetherGame=false",
-            safe="",
-        )
-        uri_ticket = (
-            f"roblox-player:1+launchmode:play+gameinfo:{ticket}"
-            f"+launchtime:{launch_time}+placelauncherurl:{place_url}"
-            f"+browsertrackerid:{launch_time}+robloxLocale:en_us+gameLocale:en_us"
-        )
-        rc = exec_shell(
-            f"am start {user_flag} -p {q_pkg} -a android.intent.action.VIEW -d {shlex.quote(uri_ticket)}"
-        )
-        if rc != 0:
-            url_direct = f"roblox://placeId={game_id}"
-            rc = exec_shell(
-                f"am start {user_flag} -p {q_pkg} -a android.intent.action.VIEW -d {shlex.quote(url_direct)}"
-            )
-    else:
+    uri_exp = f"roblox://experiences/start?placeId={game_id}"
+    rc = exec_shell(
+        f"am start {user_flag} -p {q_pkg} -a android.intent.action.VIEW -d {shlex.quote(uri_exp)}"
+    )
+    if rc != 0:
         url_direct = f"roblox://placeId={game_id}"
         rc = exec_shell(
             f"am start {user_flag} -p {q_pkg} -a android.intent.action.VIEW -d {shlex.quote(url_direct)}"
