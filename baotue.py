@@ -110,7 +110,6 @@ def is_in_game(user_id):
         if r.status_code == 200:
             presences = r.json().get("userPresences", [])
             if presences:
-                # userPresenceType == 2 nghĩa là đang trong game (In-Game)
                 return presences[0].get("userPresenceType") == 2
     except Exception:
         pass
@@ -137,41 +136,83 @@ def get_auth_ticket(cookie):
     except Exception:
         return None
 
-def launch_package_tab(pkg, game_id, acc_info=None, is_rejoin=False):
+def has_error_279(pkg):
+    """Kiểm tra log hệ thống gần nhất xem package có dính lỗi Error 279 hay không."""
+    try:
+        pid = os.popen(f"pidof {pkg}").read().strip()
+        cmd = f"logcat -d -t 120 2>/dev/null"
+        logs = os.popen(cmd).read()
+        if not logs:
+            logs = os.popen("su -c 'logcat -d -t 120' 2>/dev/null").read()
+        if not logs:
+            return False
+
+        for line in logs.splitlines():
+            low = line.lower()
+            if ("279" in low and ("error" in low or "disconnect" in low or "connection" in low or "kick" in low)):
+                if not pid or pkg.lower() in low or pid in low:
+                    return True
+    except Exception:
+        pass
+    return False
+
+def inject_cookie_to_pkg(pkg, cookie):
+    inject_cmd = f"""su -c '
+    mkdir -p /data/data/{pkg}/app_webview/Default/
+    cat << "EOF" > /data/data/{pkg}/app_webview/Default/Cookies
+    # Netscape HTTP Cookie File
+    .roblox.com\tTRUE\t/\tTRUE\t0\t.ROBLOSECURITY\t{cookie}
+    EOF
+    chmod -R 777 /data/data/{pkg}/app_webview/
+    ' 2>/dev/null"""
+    os.system(inject_cmd)
+
+def open_only_app(pkg, acc_info=None):
+    """Chỉ bật tab/app lên trước."""
     display_name = acc_info["name"] if acc_info else "Chưa gắn Cookie"
-    action_text = "ĐANG REJOIN LẠI TAB" if is_rejoin else "ĐANG KHỞI ĐỘNG TAB"
-    print(f"\n{C_YELLOW}{C_BOLD}  [⏳] {action_text}: {pkg}{C_RESET}")
-    print(f"       {C_WHITE}• Tài khoản : {C_PURPLE}{display_name}{C_RESET}")
-    print(f"       {C_WHITE}• Join Game : {C_CYAN}{game_id}{C_RESET}")
-    
-    # Chỉ kill và làm mới app khi thực hiện Rejoin hoặc khởi động mới
+    print(f"{C_YELLOW}{C_BOLD}  [⬆] Đang bật tab: {pkg}{C_RESET} {C_DIM}({display_name}){C_RESET}")
     os.system(f"am force-stop {pkg} 2>/dev/null || su -c 'am force-stop {pkg}'")
-    time.sleep(2)
-    
+    time.sleep(1.5)
+    if acc_info and acc_info.get("cookie"):
+        inject_cookie_to_pkg(pkg, acc_info["cookie"])
+    os.system(f"monkey -p {pkg} -c android.intent.category.LAUNCHER 1 > /dev/null 2>&1 || am start -p {pkg} > /dev/null 2>&1")
+    print(f"{C_GREEN}  [✔] Tab {pkg} đã được bật lên!{C_RESET}")
+
+def join_game_for_pkg(pkg, game_id, acc_info=None):
+    """Gửi lệnh join vào game ID đã cấu hình cho tab."""
+    display_name = acc_info["name"] if acc_info else "Chưa gắn Cookie"
+    print(f"{C_CYAN}{C_BOLD}  [🎮] Đang join Game ID {game_id} cho tab: {pkg}{C_RESET} {C_PURPLE}({display_name}){C_RESET}")
     if acc_info and acc_info.get("cookie"):
         cookie = acc_info["cookie"]
+        inject_cookie_to_pkg(pkg, cookie)
         ticket = get_auth_ticket(cookie)
-        
-        # Bơm file cookie trực tiếp vào WebView/Internal Storage của app mod
-        inject_cmd = f"""su -c '
-        mkdir -p /data/data/{pkg}/app_webview/Default/
-        cat << "EOF" > /data/data/{pkg}/app_webview/Default/Cookies
-        # Netscape HTTP Cookie File
-        .roblox.com\tTRUE\t/\tTRUE\t0\t.ROBLOSECURITY\t{cookie}
-        EOF
-        chmod -R 777 /data/data/{pkg}/app_webview/
-        '"""
-        os.system(inject_cmd)
-
         if ticket:
             url = f"roblox://placeId={game_id}&ticket={ticket}"
             os.system(f'am start -p {pkg} -a android.intent.action.VIEW -d "{url}" > /dev/null 2>&1')
-            print(f"{C_GREEN}{C_BOLD}  [✔] ĐÃ BƠM COOKIE & GỬI VÉ JOIN GAME THÀNH CÔNG!{C_RESET}")
+            print(f"{C_GREEN}{C_BOLD}  [✔] Đã gửi vé Cookie & join Game {game_id} cho {pkg}!{C_RESET}")
             return
 
     url_direct = f"roblox://placeId={game_id}"
     os.system(f'am start -p {pkg} -a android.intent.action.VIEW -d "{url_direct}" > /dev/null 2>&1')
-    print(f"{C_GREEN}{C_BOLD}  [✔] ĐÃ MỞ APP & JOIN THẲNG VÀO GAME ID {game_id}!{C_RESET}")
+    print(f"{C_GREEN}{C_BOLD}  [✔] Đã gửi lệnh join Game ID {game_id} cho {pkg}!{C_RESET}")
+
+def kill_and_rejoin_pkg(pkg, game_id, acc_info=None, reason="Mất kết nối"):
+    """Kill đúng tab đang lỗi và rejoin lại tab đó."""
+    display_name = acc_info["name"] if acc_info else pkg
+    print(f"\n{C_RED}{C_BOLD}  [🛑 KILL & REJOIN] {display_name} ({pkg}) -> Lý do: {reason}{C_RESET}")
+    os.system(f"am force-stop {pkg} 2>/dev/null || su -c 'am force-stop {pkg}'")
+    time.sleep(2)
+    open_only_app(pkg, acc_info)
+    time.sleep(3)
+    join_game_for_pkg(pkg, game_id, acc_info)
+
+def launch_package_tab(pkg, game_id, acc_info=None, is_rejoin=False):
+    if is_rejoin:
+        kill_and_rejoin_pkg(pkg, game_id, acc_info, reason="Rejoin tab")
+    else:
+        open_only_app(pkg, acc_info)
+        time.sleep(2)
+        join_game_for_pkg(pkg, game_id, acc_info)
 
 def run_auto_rejoin(cfg):
     active_pkgs = [p["pkg"] for p in cfg.get("packages", []) if p.get("active", True)]
@@ -192,11 +233,20 @@ def run_auto_rejoin(cfg):
     print(f"  {C_YELLOW}{C_BOLD}• CHU KỲ KIỂM TRA    :{C_RESET} {C_WHITE}{C_BOLD}{cfg.get('delay', 20)} giây / lần{C_RESET}\n")
     print(f"{C_CYAN}──────────────────────────────────────────────────────────────────────────────{C_RESET}")
 
+    # BƯỚC 1: Khởi động toàn bộ các tab lên hết trước
+    print(f"\n{C_PURPLE}{C_BOLD}  [BƯỚC 1/2] ĐANG KHỞI ĐỘNG TOÀN BỘ {len(active_pkgs)} TAB LÊN TRƯỚC...{C_RESET}\n")
     for pkg in active_pkgs:
-        launch_package_tab(pkg, cfg["game_id"], acc_map.get(pkg), is_rejoin=False)
-        time.sleep(6)
+        open_only_app(pkg, acc_map.get(pkg))
+        time.sleep(3)
 
-    print(f"\n{C_GREEN}{C_BOLD}  [⚡] ĐÃ KHỞI ĐỘNG XONG! BẮT ĐẦU GIÁM SÁT TỰ ĐỘNG GIỮ NGUYÊN TAB...{C_RESET}")
+    print(f"\n{C_CYAN}──────────────────────────────────────────────────────────────────────────────{C_RESET}")
+    # BƯỚC 2: Sau khi các tab đã bật lên hết mới bắt đầu cho join vào game
+    print(f"\n{C_GREEN}{C_BOLD}  [BƯỚC 2/2] TẤT CẢ TAB ĐÃ BẬT! BẮT ĐẦU JOIN VÀO GAME ID {cfg['game_id']}...{C_RESET}\n")
+    for pkg in active_pkgs:
+        join_game_for_pkg(pkg, cfg["game_id"], acc_map.get(pkg))
+        time.sleep(4)
+
+    print(f"\n{C_GREEN}{C_BOLD}  [⚡] ĐÃ HOÀN TẤT KHỞI ĐỘNG & JOIN GAME! BẮT ĐẦU GIÁM SÁT (BAO GỒM ERROR 279)...{C_RESET}")
     print(f"{C_YELLOW}  (Nhấn tổ hợp phím Ctrl + C để dừng và quay về Menu chính){C_RESET}\n")
     
     try:
@@ -206,23 +256,26 @@ def run_auto_rejoin(cfg):
             for pkg in active_pkgs:
                 acc = acc_map.get(pkg)
                 pid = os.popen(f"pidof {pkg}").read().strip()
+                err279 = has_error_279(pkg)
                 
                 if acc and acc.get("uid"):
                     ingame = is_in_game(acc["uid"])
-                    # Chỉ Rejoin khi tiến trình app chết hẳn HOẶC server báo tài khoản không còn trong game (văng sảnh/disconnect)
-                    if not pid or ingame is False:
-                        reason = "Tiến trình App đã tắt" if not pid else "Bị văng khỏi phòng / Mất kết nối"
-                        print(f"{C_RED}{C_BOLD}  [⚠ PHÁT HIỆN VĂNG] {acc['name']} ({pkg}){C_RESET}")
-                        print(f"{C_RED}     ➔ Lý do: {reason} -> Đang tự động Rejoin lại...{C_RESET}")
-                        launch_package_tab(pkg, cfg["game_id"], acc, is_rejoin=True)
-                        time.sleep(8)
+                    if err279 or not pid or ingame is False:
+                        if err279:
+                            reason = "Phát hiện lỗi Error 279 (Mất kết nối)"
+                        elif not pid:
+                            reason = "Tiến trình App đã tắt"
+                        else:
+                            reason = "Bị văng khỏi phòng / Mất kết nối"
+                        kill_and_rejoin_pkg(pkg, cfg["game_id"], acc, reason=reason)
+                        time.sleep(6)
                     else:
                         print(f"{C_GREEN}{C_BOLD}  [✔ ONLINE] {acc['name']:<18} | {pkg} -> Giữ nguyên tab, đang cày ổn định{C_RESET}")
                 else:
-                    if not pid:
-                        print(f"{C_RED}{C_BOLD}  [⚠ TẮT APP] {pkg} -> Đang mở lại & Join Game {cfg['game_id']}...{C_RESET}")
-                        launch_package_tab(pkg, cfg["game_id"], None, is_rejoin=True)
-                        time.sleep(8)
+                    if err279 or not pid:
+                        reason = "Phát hiện lỗi Error 279" if err279 else "Tiến trình App đã tắt"
+                        kill_and_rejoin_pkg(pkg, cfg["game_id"], None, reason=reason)
+                        time.sleep(6)
                     else:
                         print(f"{C_GREEN}{C_BOLD}  [✔ RUNNING] {pkg} (PID: {pid}) -> Giữ nguyên tab, App đang chạy ổn định{C_RESET}")
             
