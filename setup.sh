@@ -4,26 +4,31 @@ echo "=================================================="
 echo "   DANG CAI DAT & KHOI CHAY TOOL BAOTUE.PY"
 echo "=================================================="
 
-# 1. Cap quyen bo nho & cai dat goi can thiet
+GH_TOKEN="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"
+if [ -z "$GH_TOKEN" ]; then
+    echo "[LOI] Thieu GitHub Token!"
+    exit 1
+fi
+
 termux-setup-storage
 pkg update -y && pkg install -y python curl
 pip install --break-system-packages --no-cache-dir requests
 
-# 2. Tao thu muc va tai nguyen ban baotue.py
 mkdir -p /sdcard/Download
-curl -fsSL "https://raw.githubusercontent.com/baotuecoder999/BTHub/main/baotue.py" -o /sdcard/Download/baotue.py
+curl -fsSL \
+  -H "Authorization: Bearer $GH_TOKEN" \
+  -H "Accept: application/vnd.github.v3.raw" \
+  "https://api.github.com/repos/baotuecoder999/BTHub/contents/baotue.py" \
+  -o /sdcard/Download/baotue.py
 
-# Kiem tra xem tai file co thanh cong khong (tranh loi 404)
-if [ ! -s /sdcard/Download/baotue.py ] || grep -q "404: Not Found" /sdcard/Download/baotue.py; then
-    echo "[LOI] Khong tai duoc baotue.py! Hay kiem tra lai ten file hoac che do Public cua repo BTHub."
+if [ ! -s /sdcard/Download/baotue.py ]; then
+    echo "[LOI] Khong tai duoc baotue.py tu repo Private! Kiem tra lai ten file 'baotue.py' tren repo."
     exit 1
 fi
 
-# 3. Tao lenh tat 'baotue' de lan sau mo nhanh
 grep -q "alias baotue=" ~/.bashrc || echo 'alias baotue="cd /sdcard/Download && su -c \"python baotue.py\""' >> ~/.bashrc
 source ~/.bashrc 2>/dev/null
 
-# 4. Tu dong chay tool (ho tro ca may da Root va chua Root)
 echo "[OK] Cai dat hoan tat! Dang mo tool..."
 cd /sdcard/Download
 if command -v su >/dev/null 2>&1 && su -c "id" >/dev/null 2>&1; then
