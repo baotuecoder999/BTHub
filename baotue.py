@@ -10,6 +10,12 @@ for _p in glob.glob("/data/data/com.termux/files/usr/local/lib/python*/site-pack
         sys.path.append(_p)
 
 import os
+import re
+import shlex
+import shutil
+import sqlite3
+import subprocess
+import tempfile
 import time
 import json
 
@@ -33,28 +39,59 @@ def get_cfg_path():
 
 CFG_PATH = get_cfg_path()
 
+def _is_root_uid():
+    geteuid = getattr(os, "geteuid", None)
+    return bool(geteuid and geteuid() == 0)
+
 def has_root():
     try:
-        if os.geteuid() == 0:
+        if _is_root_uid():
             return True
-        out = os.popen("su -c 'id -u' 2>/dev/null").read().strip()
-        return out == "0"
+        res = subprocess.run(
+            ["su", "-c", "id -u"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        )
+        return res.returncode == 0 and res.stdout.strip() == "0"
     except Exception:
         return False
 
 HAS_ROOT = has_root()
 
-def run_shell(cmd):
-    if HAS_ROOT and os.geteuid() != 0:
-        safe_cmd = cmd.replace('"', '\\"')
-        return os.popen(f'su -c "{safe_cmd}" 2>/dev/null').read()
-    return os.popen(f"{cmd} 2>/dev/null").read()
+def run_shell(cmd, timeout=30):
+    try:
+        if HAS_ROOT and not _is_root_uid():
+            argv = ["su", "-c", cmd]
+        else:
+            argv = ["sh", "-c", cmd]
+        res = subprocess.run(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=timeout,
+        )
+        return res.stdout or ""
+    except Exception:
+        return ""
 
-def exec_shell(cmd):
-    if HAS_ROOT and os.geteuid() != 0:
-        safe_cmd = cmd.replace('"', '\\"')
-        return os.system(f'su -c "{safe_cmd}" >/dev/null 2>&1')
-    return os.system(f"{cmd} >/dev/null 2>&1")
+def exec_shell(cmd, timeout=30):
+    try:
+        if HAS_ROOT and not _is_root_uid():
+            argv = ["su", "-c", cmd]
+        else:
+            argv = ["sh", "-c", cmd]
+        res = subprocess.run(
+            argv,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+        return res.returncode
+    except Exception:
+        return 1
 
 # --- BẢNG MÀU & ĐỊNH DẠNG ANSI ---
 C_CYAN = "\033[96m"
@@ -131,90 +168,446 @@ def scan_packages():
 
     return sorted(list(found))
 
+CHROME_EPOCH_OFFSET = 11644473600
+COOKIE_TTL_DAYS = 365
+ROBLOX_PREFS_USER_KEYS = ("userid_long", "username", "displayName", "under13")
+LAUNCH_GRACE_SECONDS = 45
+ROBLOX_HTTP_UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36"
+
+def normalize_cookie(raw_cookie):
+    if not raw_cookie:
+        return ""
+    ck = raw_cookie.strip().strip('"').strip("'")
+    if ".ROBLOSECURITY=" in ck:
+        ck = ck.split(".ROBLOSECURITY=", 1)[1].split(";", 1)[0].strip()
+    warn_idx = ck.find("_|WARNING:")
+    if warn_idx != -1:
+        ck = ck[warn_idx:].strip()
+    if ";" in ck:
+        ck = ck.split(";", 1)[0].strip()
+    return ck.strip().strip('"').strip("'")
+
 def verify_cookie(cookie):
     try:
-        cookie = cookie.strip().strip('"').strip("'")
-        if ".ROBLOSECURITY=" in cookie:
-            cookie = cookie.split(".ROBLOSECURITY=")[1].split(";")[0]
+        ck = normalize_cookie(cookie)
+        if not ck:
+            return None, None, None
 
         r = requests.get(
             "https://users.roblox.com/v1/users/authenticated",
-            cookies={".ROBLOSECURITY": cookie},
-            timeout=10
+            cookies={".ROBLOSECURITY": ck},
+            headers={"User-Agent": ROBLOX_HTTP_UA},
+            timeout=10,
         )
         if r.status_code == 200:
             data = r.json()
-            return str(data["id"]), data["name"], cookie
+            return str(data["id"]), data["name"], ck
     except Exception:
         pass
     return None, None, None
 
-def is_in_game(user_id):
+def is_in_game(user_id, cookie=None):
     if not user_id:
         return None
     try:
+        cookies = {".ROBLOSECURITY": normalize_cookie(cookie)} if cookie else None
         r = requests.post(
             "https://presence.roblox.com/v1/presence/users",
             json={"userIds": [int(user_id)]},
-            timeout=10
+            cookies=cookies,
+            headers={"User-Agent": ROBLOX_HTTP_UA},
+            timeout=10,
         )
         if r.status_code == 200:
             presences = r.json().get("userPresences", [])
             if presences:
                 return presences[0].get("userPresenceType") == 2
+        return None
     except Exception:
-        pass
-    return False
+        return None
 
 def get_auth_ticket(cookie):
-    if not cookie:
+    ck = normalize_cookie(cookie)
+    if not ck:
         return None
     try:
         s = requests.Session()
-        s.cookies[".ROBLOSECURITY"] = cookie
+        s.cookies[".ROBLOSECURITY"] = ck
         headers = {
             "User-Agent": "Roblox/WinInet",
-            "Referer": "https://www.roblox.com/"
+            "Referer": "https://www.roblox.com/",
         }
         r1 = s.post("https://auth.roblox.com/v1/authentication-ticket", headers=headers, timeout=10)
         csrf = r1.headers.get("x-csrf-token")
         if csrf:
             headers["x-csrf-token"] = csrf
-        
+
         r2 = s.post("https://auth.roblox.com/v1/authentication-ticket", headers=headers, timeout=10)
-        ticket = r2.headers.get("rbx-authentication-ticket")
-        return ticket
+        return r2.headers.get("rbx-authentication-ticket")
     except Exception:
         return None
 
-def has_error_279(pkg):
+def has_error_279(pkg, pid=None):
     """Kiểm tra log hệ thống gần nhất xem package có dính lỗi Error 279 hay không."""
     try:
-        pid = run_shell(f"pidof {pkg}").strip()
-        logs = run_shell("logcat -d -t 120")
+        if pid is None:
+            pid = run_shell(f"pidof {shlex.quote(pkg)}").strip()
+        if not pid:
+            return False
+        pids = set(pid.split())
+        logs = run_shell("logcat -d -t 200")
         if not logs:
             return False
 
+        pkg_low = pkg.lower()
         for line in logs.splitlines():
             low = line.lower()
-            if ("279" in low and ("error" in low or "disconnect" in low or "connection" in low or "kick" in low)):
-                if not pid or pkg.lower() in low or pid in low:
-                    return True
+            if "279" not in low:
+                continue
+            if not any(k in low for k in ("error", "disconnect", "connection", "kick")):
+                continue
+            parts = line.split()
+            pid_match = len(parts) >= 3 and parts[2] in pids
+            if pid_match or pkg_low in low:
+                return True
     except Exception:
         pass
     return False
 
+def _get_pkg_owner(pkg):
+    data_dir = f"/data/data/{pkg}"
+    owner = run_shell(f"stat -L -c '%u:%g' {shlex.quote(data_dir)}").strip()
+    if owner and ":" in owner:
+        return owner
+    return ""
+
+def _create_fallback_cookies_db(db_path):
+    if os.path.exists(db_path):
+        os.remove(db_path)
+    con = sqlite3.connect(db_path)
+    try:
+        cur = con.cursor()
+        cur.execute("PRAGMA journal_mode=DELETE")
+        cur.execute(
+            "CREATE TABLE meta("
+            "key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, "
+            "value LONGVARCHAR)"
+        )
+        cur.execute(
+            "CREATE TABLE cookies("
+            "creation_utc INTEGER NOT NULL,"
+            "host_key TEXT NOT NULL,"
+            "top_frame_site_key TEXT NOT NULL,"
+            "name TEXT NOT NULL,"
+            "value TEXT NOT NULL,"
+            "encrypted_value BLOB NOT NULL,"
+            "path TEXT NOT NULL,"
+            "expires_utc INTEGER NOT NULL,"
+            "is_secure INTEGER NOT NULL,"
+            "is_httponly INTEGER NOT NULL,"
+            "last_access_utc INTEGER NOT NULL,"
+            "has_expires INTEGER NOT NULL,"
+            "is_persistent INTEGER NOT NULL,"
+            "priority INTEGER NOT NULL,"
+            "samesite INTEGER NOT NULL,"
+            "source_scheme INTEGER NOT NULL,"
+            "source_port INTEGER NOT NULL,"
+            "is_same_party INTEGER NOT NULL,"
+            "last_update_utc INTEGER NOT NULL)"
+        )
+        cur.execute(
+            "CREATE UNIQUE INDEX cookies_unique_index "
+            "ON cookies(host_key, top_frame_site_key, name, path)"
+        )
+        cur.executemany(
+            "INSERT INTO meta(key, value) VALUES (?, ?)",
+            [("mmap_status", "-1"), ("version", "18"), ("last_compatible_version", "18")],
+        )
+        con.commit()
+    finally:
+        con.close()
+
+def _has_cookies_table(db_path):
+    if not os.path.isfile(db_path) or os.path.getsize(db_path) < 1024:
+        return False
+    con = None
+    try:
+        con = sqlite3.connect(db_path)
+        row = con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='cookies'"
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+    finally:
+        if con is not None:
+            con.close()
+
+def _read_roblosecurity_from_db(db_path):
+    if not _has_cookies_table(db_path):
+        return None
+    con = None
+    try:
+        con = sqlite3.connect(db_path)
+        row = con.execute(
+            "SELECT value FROM cookies WHERE name = '.ROBLOSECURITY' "
+            "AND host_key IN ('.roblox.com', 'roblox.com', 'www.roblox.com') "
+            "ORDER BY last_update_utc DESC LIMIT 1"
+        ).fetchone()
+        return row[0] if row and row[0] else None
+    except Exception:
+        try:
+            row = con.execute(
+                "SELECT value FROM cookies WHERE name = '.ROBLOSECURITY' LIMIT 1"
+            ).fetchone()
+            return row[0] if row and row[0] else None
+        except Exception:
+            return None
+    finally:
+        if con is not None:
+            con.close()
+
+def _upsert_roblosecurity_in_db(db_path, cookie):
+    con = sqlite3.connect(db_path)
+    try:
+        cur = con.cursor()
+        cur.execute("PRAGMA journal_mode=DELETE")
+        col_info = list(cur.execute("PRAGMA table_info(cookies)"))
+        if not col_info:
+            raise RuntimeError("cookies table has no columns")
+
+        now_us = int((time.time() + CHROME_EPOCH_OFFSET) * 1_000_000)
+        max_row = cur.execute("SELECT MAX(creation_utc) FROM cookies").fetchone()
+        if max_row and max_row[0] is not None and max_row[0] >= now_us:
+            now_us = int(max_row[0]) + 1
+        exp_us = now_us + COOKIE_TTL_DAYS * 86400 * 1_000_000
+
+        defaults = {
+            "creation_utc": now_us,
+            "host_key": ".roblox.com",
+            "top_frame_site_key": "",
+            "name": ".ROBLOSECURITY",
+            "value": cookie,
+            "encrypted_value": b"",
+            "path": "/",
+            "expires_utc": exp_us,
+            "is_secure": 1,
+            "is_httponly": 1,
+            "last_access_utc": now_us,
+            "has_expires": 1,
+            "is_persistent": 1,
+            "priority": 1,
+            "samesite": -1,
+            "source_scheme": 2,
+            "source_port": 443,
+            "is_same_party": 0,
+            "last_update_utc": now_us,
+            "source_type": 0,
+            "has_cross_site_ancestor": 0,
+        }
+
+        cols = []
+        vals = []
+        for _cid, name, ctype, _notnull, _dflt, _pk in col_info:
+            cols.append(name)
+            if name in defaults:
+                vals.append(defaults[name])
+            else:
+                ct = (ctype or "").upper()
+                if "BLOB" in ct:
+                    vals.append(b"")
+                elif "CHAR" in ct or "TEXT" in ct or "CLOB" in ct:
+                    vals.append("")
+                else:
+                    vals.append(0)
+
+        cur.execute("DELETE FROM cookies WHERE name = '.ROBLOSECURITY'")
+        placeholders = ",".join("?" for _ in cols)
+        cur.execute(
+            f"INSERT OR REPLACE INTO cookies ({','.join(cols)}) VALUES ({placeholders})",
+            vals,
+        )
+        con.commit()
+
+        check = cur.execute("PRAGMA integrity_check").fetchone()
+        if not check or check[0].lower() != "ok":
+            raise RuntimeError(f"sqlite integrity_check failed: {check}")
+
+        verify = cur.execute(
+            "SELECT value FROM cookies WHERE name = '.ROBLOSECURITY' AND host_key = '.roblox.com'"
+        ).fetchone()
+        if not verify or verify[0] != cookie:
+            raise RuntimeError("injected cookie verification mismatch")
+    finally:
+        con.close()
+
+def _strip_prefs_user_keys(xml_text):
+    keys_pat = "|".join(re.escape(k) for k in ROBLOX_PREFS_USER_KEYS)
+    pattern = (
+        r'^[ \t]*<(?:string|long|int|boolean)\s+name="(?:'
+        + keys_pat
+        + r')"[^>]*?(?:/>|>.*?</(?:string|long|int|boolean)>)[ \t]*\r?\n?'
+    )
+    return re.sub(pattern, "", xml_text, flags=re.MULTILINE | re.DOTALL)
+
+def _pull_file_as_root(src_path, dst_path):
+    uid_gid = f"{os.getuid()}:{os.getgid()}" if hasattr(os, "getuid") else "0:0"
+    q_src = shlex.quote(src_path)
+    q_dst = shlex.quote(dst_path)
+    cmd = f"if [ -f {q_src} ]; then cat {q_src} > {q_dst} && chown {uid_gid} {q_dst} && chmod 600 {q_dst}; fi"
+    exec_shell(cmd)
+    return os.path.isfile(dst_path)
+
+def _pull_cookies_bundle(pkg, tmp_dir):
+    base = f"/data/data/{pkg}/app_webview/Default"
+    tmp_db = os.path.join(tmp_dir, "Cookies")
+    for suffix in ("", "-journal", "-wal", "-shm"):
+        p = os.path.join(tmp_dir, "Cookies" + suffix)
+        if os.path.exists(p):
+            os.remove(p)
+        _pull_file_as_root(f"{base}/Cookies{suffix}", p)
+    return tmp_db
+
+def _bootstrap_webview_cookies(pkg, cookies_path):
+    q_pkg = shlex.quote(pkg)
+    q_ck = shlex.quote(cookies_path)
+    exec_shell(f"rm -f {q_ck} {q_ck}-journal {q_ck}-wal {q_ck}-shm")
+
+    act = run_shell(f"cmd package resolve-activity --brief {q_pkg}").splitlines()
+    component = act[-1].strip() if act else ""
+    if "/" in component and not component.lower().startswith("no "):
+        exec_shell(f"am start -n {shlex.quote(component)}")
+    else:
+        exec_shell(f"monkey -p {q_pkg} -c android.intent.category.LAUNCHER 1")
+
+    for _ in range(8):
+        time.sleep(1.0)
+        sz = run_shell(f"stat -c '%s' {q_ck}").strip()
+        if sz.isdigit() and int(sz) >= 4096:
+            break
+
+    exec_shell(f"am force-stop {q_pkg}")
+    time.sleep(1.0)
+
+def _clean_stale_session_files(pkg, owner, tmp_dir):
+    base = f"/data/data/{pkg}"
+    q_def = shlex.quote(f"{base}/app_webview/Default")
+    q_app_storage = shlex.quote(f"{base}/files/appData/LocalStorage/appStorage.json")
+    q_db_dir = shlex.quote(f"{base}/databases")
+
+    exec_shell(
+        f"rm -f {q_def}/Cookies-journal {q_def}/Cookies-wal {q_def}/Cookies-shm "
+        f"{q_app_storage} {q_db_dir}/roblox-database-default*"
+    )
+
+    prefs_path = f"{base}/shared_prefs/prefs.xml"
+    tmp_prefs = os.path.join(tmp_dir, "prefs.xml")
+    if _pull_file_as_root(prefs_path, tmp_prefs):
+        try:
+            with open(tmp_prefs, "r", encoding="utf-8", errors="ignore") as f:
+                orig_xml = f.read()
+            cleaned_xml = _strip_prefs_user_keys(orig_xml)
+            if cleaned_xml != orig_xml:
+                with open(tmp_prefs, "w", encoding="utf-8") as f:
+                    f.write(cleaned_xml)
+                q_tmp = shlex.quote(tmp_prefs)
+                q_prefs = shlex.quote(prefs_path)
+                q_own = shlex.quote(owner)
+                exec_shell(
+                    f"cat {q_tmp} > {q_prefs} && chown {q_own} {q_prefs} && "
+                    f"chmod 660 {q_prefs} && (restorecon {q_prefs} 2>/dev/null || true)"
+                )
+        except Exception:
+            pass
+
+def is_session_synced(pkg, expected_uid, expected_cookie):
+    if not HAS_ROOT or not pkg or not expected_cookie:
+        return False
+    ck = normalize_cookie(expected_cookie)
+    if not ck:
+        return False
+
+    if expected_uid:
+        prefs_path = f"/data/data/{pkg}/shared_prefs/prefs.xml"
+        uid_line = run_shell(
+            f"grep -F 'name=\"userid_long\"' {shlex.quote(prefs_path)}"
+        )
+        if f'value="{expected_uid}"' not in uid_line:
+            return False
+
+    tmp_dir = tempfile.mkdtemp(prefix="rblx_chk_")
+    try:
+        tmp_db = _pull_cookies_bundle(pkg, tmp_dir)
+        stored_ck = _read_roblosecurity_from_db(tmp_db)
+        return stored_ck == ck
+    except Exception:
+        return False
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
 def inject_cookie_to_pkg(pkg, cookie):
     if not HAS_ROOT:
-        return
-    inject_cmd = (
-        f"mkdir -p /data/data/{pkg}/app_webview/Default/ && "
-        f"printf '# Netscape HTTP Cookie File\\n.roblox.com\\tTRUE\\t/\\tTRUE\\t0\\t.ROBLOSECURITY\\t%s\\n' '{cookie}' > /data/data/{pkg}/app_webview/Default/Cookies && "
-        f"chmod -R 777 /data/data/{pkg}/app_webview/"
-    )
-    exec_shell(inject_cmd)
+        return False, "Root (su) access is required to inject cookies"
+    ck = normalize_cookie(cookie)
+    if not pkg or not ck:
+        return False, "Invalid package or empty cookie"
 
-def launch_and_join_single_tab(pkg, game_id, acc_info=None, is_rejoin=False):
+    q_pkg = shlex.quote(pkg)
+    if run_shell(f"pidof {q_pkg}").strip():
+        exec_shell(f"am force-stop {q_pkg}")
+        time.sleep(1.0)
+
+    owner = _get_pkg_owner(pkg)
+    if not owner:
+        return False, f"Package data directory not found: /data/data/{pkg}"
+
+    webview_dir = f"/data/data/{pkg}/app_webview"
+    default_dir = f"{webview_dir}/Default"
+    cookies_path = f"{default_dir}/Cookies"
+
+    tmp_dir = tempfile.mkdtemp(prefix="rblx_ck_")
+    try:
+        tmp_db = _pull_cookies_bundle(pkg, tmp_dir)
+        if not _has_cookies_table(tmp_db):
+            _bootstrap_webview_cookies(pkg, cookies_path)
+            tmp_db = _pull_cookies_bundle(pkg, tmp_dir)
+        if not _has_cookies_table(tmp_db):
+            _create_fallback_cookies_db(tmp_db)
+
+        _upsert_roblosecurity_in_db(tmp_db, ck)
+        expected_size = os.path.getsize(tmp_db)
+
+        _clean_stale_session_files(pkg, owner, tmp_dir)
+
+        q_wv = shlex.quote(webview_dir)
+        q_def = shlex.quote(default_dir)
+        q_dst = shlex.quote(cookies_path)
+        q_tmp = shlex.quote(tmp_db)
+        q_own = shlex.quote(owner)
+
+        push_cmd = (
+            f"mkdir -p {q_def} && "
+            f"cat {q_tmp} > {q_dst} && "
+            f"chown {q_own} {q_wv} {q_def} {q_dst} && "
+            f"chmod 770 {q_wv} {q_def} && "
+            f"chmod 660 {q_dst} && "
+            f"(restorecon -R {q_wv} 2>/dev/null || true)"
+        )
+        rc = exec_shell(push_cmd)
+        if rc != 0:
+            return False, f"Failed to write Cookies DB to {cookies_path}"
+
+        actual_size = run_shell(f"stat -c '%s' {q_dst}").strip()
+        if not actual_size.isdigit() or int(actual_size) != expected_size:
+            return False, f"Cookies DB size mismatch (expected {expected_size}, got {actual_size or 'none'})"
+
+        return True, "OK"
+    except Exception as e:
+        return False, str(e)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+def launch_and_join_single_tab(pkg, game_id, acc_info=None, is_rejoin=False, force_inject=False):
     """Khởi động từng tab riêng lẻ và cho join thẳng vào Game ID đã set ngay lập tức."""
     display_name = acc_info["name"] if acc_info else "Chưa gắn Cookie"
     action_text = "REJOIN & JOIN GAME" if is_rejoin else "KHỞI ĐỘNG & JOIN GAME"
@@ -222,31 +615,39 @@ def launch_and_join_single_tab(pkg, game_id, acc_info=None, is_rejoin=False):
     print(f"       {C_WHITE}• Tài khoản : {C_PURPLE}{display_name}{C_RESET}")
     print(f"       {C_WHITE}• ID Game   : {C_GREEN}{game_id}{C_RESET}")
 
-    exec_shell(f"am force-stop {pkg}")
-    time.sleep(1.5)
+    q_pkg = shlex.quote(pkg)
+    exec_shell(f"am force-stop {q_pkg}")
+    time.sleep(1.2)
 
     if acc_info and acc_info.get("cookie"):
-        cookie = acc_info["cookie"]
-        inject_cookie_to_pkg(pkg, cookie)
-        ticket = get_auth_ticket(cookie)
-        if ticket:
-            url = f"roblox://placeId={game_id}&ticket={ticket}"
-            exec_shell(f'am start -p {pkg} -a android.intent.action.VIEW -d "{url}"')
-            print(f"{C_GREEN}{C_BOLD}  [✔] Đã khởi động tab {pkg} & join thẳng vào Game ID {game_id}!{C_RESET}")
-            return
+        cookie = normalize_cookie(acc_info["cookie"])
+        need_inject = force_inject or not is_session_synced(pkg, acc_info.get("uid"), cookie)
+        if need_inject:
+            ok, err = inject_cookie_to_pkg(pkg, cookie)
+            if not ok:
+                print(f"{C_RED}{C_BOLD}  [ERROR] Cookie inject failed for {pkg}: {err}{C_RESET}")
+                return False
+            print(f"{C_GREEN}  [OK] Injected WebView SQLite cookie for {pkg}{C_RESET}")
+        else:
+            print(f"{C_DIM}  [OK] Existing session already synced for {pkg}{C_RESET}")
 
     url_direct = f"roblox://placeId={game_id}"
-    exec_shell(f'am start -p {pkg} -a android.intent.action.VIEW -d "{url_direct}"')
+    rc = exec_shell(f"am start -p {q_pkg} -a android.intent.action.VIEW -d {shlex.quote(url_direct)}")
+    if rc != 0:
+        print(f"{C_RED}{C_BOLD}  [ERROR] Failed to launch {pkg} with placeId={game_id}{C_RESET}")
+        return False
+
     print(f"{C_GREEN}{C_BOLD}  [✔] Đã khởi động tab {pkg} & join thẳng vào Game ID {game_id}!{C_RESET}")
+    return True
 
 def kill_and_rejoin_pkg(pkg, game_id, acc_info=None, reason="Mất kết nối"):
     """Kill đúng tab đang lỗi và rejoin lại tab đó vào Game ID ngay."""
     display_name = acc_info["name"] if acc_info else pkg
     print(f"\n{C_RED}{C_BOLD}  [🛑 KILL & REJOIN] {display_name} ({pkg}) -> Lý do: {reason}{C_RESET}")
-    launch_and_join_single_tab(pkg, game_id, acc_info, is_rejoin=True)
+    return launch_and_join_single_tab(pkg, game_id, acc_info, is_rejoin=True, force_inject=False)
 
-def launch_package_tab(pkg, game_id, acc_info=None, is_rejoin=False):
-    launch_and_join_single_tab(pkg, game_id, acc_info, is_rejoin=is_rejoin)
+def launch_package_tab(pkg, game_id, acc_info=None, is_rejoin=False, force_inject=False):
+    return launch_and_join_single_tab(pkg, game_id, acc_info, is_rejoin=is_rejoin, force_inject=force_inject)
 
 def run_auto_rejoin(cfg):
     active_pkgs = [p["pkg"] for p in cfg.get("packages", []) if p.get("active", True)]
@@ -257,7 +658,9 @@ def run_auto_rejoin(cfg):
         return
 
     acc_map = {a["pkg"]: a for a in cfg.get("accounts", [])}
-    
+    last_launch = {}
+    grace_sec = max(LAUNCH_GRACE_SECONDS, cfg.get("delay", 20))
+
     os.system("clear")
     print(f"{C_CYAN}{C_BOLD}╔════════════════════════════════════════════════════════════════════════════╗{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║                 🚀 HỆ THỐNG AUTO-REJOIN ĐANG HOẠT ĐỘNG 🚀                  ║{C_RESET}")
@@ -271,41 +674,52 @@ def run_auto_rejoin(cfg):
     print(f"\n{C_PURPLE}{C_BOLD}  [⚡] KHỞI ĐỘNG TỪNG TAB & JOIN GAME NGAY (TRÁNH CRASH ĐỒNG LOẠT)...{C_RESET}")
     for pkg in active_pkgs:
         launch_and_join_single_tab(pkg, cfg["game_id"], acc_map.get(pkg), is_rejoin=False)
+        last_launch[pkg] = time.time()
         time.sleep(5)
 
     print(f"\n{C_GREEN}{C_BOLD}  [⚡] ĐÃ KHỞI ĐỘNG & GỬI JOIN TỪNG TAB! BẮT ĐẦU GIÁM SÁT (BAO GỒM ERROR 279)...{C_RESET}")
     print(f"{C_YELLOW}  (Nhấn tổ hợp phím Ctrl + C để dừng và quay về Menu chính){C_RESET}\n")
-    
+
     try:
         while True:
             print(f"{C_DIM}──────────────────────────────────────────────────────────────────────────────{C_RESET}")
             print(f"{C_CYAN}{C_BOLD}  [⏰ KIỂM TRA LÚC: {time.strftime('%H:%M:%S')}]{C_RESET}\n")
             for pkg in active_pkgs:
                 acc = acc_map.get(pkg)
-                pid = run_shell(f"pidof {pkg}").strip()
-                err279 = has_error_279(pkg)
-                
+                pid = run_shell(f"pidof {shlex.quote(pkg)}").strip()
+                err279 = has_error_279(pkg, pid)
+                elapsed = time.time() - last_launch.get(pkg, 0)
+                in_grace = elapsed < grace_sec
+
                 if acc and acc.get("uid"):
-                    ingame = is_in_game(acc["uid"])
-                    if err279 or not pid or ingame is False:
-                        if err279:
-                            reason = "Phát hiện lỗi Error 279 (Mất kết nối)"
-                        elif not pid:
-                            reason = "Tiến trình App đã tắt"
-                        else:
-                            reason = "Bị văng khỏi phòng / Mất kết nối"
+                    if err279 or (not pid and elapsed >= 8):
+                        reason = "Phát hiện lỗi Error 279 (Mất kết nối)" if err279 else "Tiến trình App đã tắt"
                         kill_and_rejoin_pkg(pkg, cfg["game_id"], acc, reason=reason)
+                        last_launch[pkg] = time.time()
                         time.sleep(6)
-                    else:
+                        continue
+
+                    ingame = is_in_game(acc["uid"], acc.get("cookie"))
+                    if ingame is True:
                         print(f"{C_GREEN}{C_BOLD}  [✔ ONLINE] {acc['name']:<18} | {pkg} -> Giữ nguyên tab, đang cày ổn định{C_RESET}")
+                    elif in_grace:
+                        remain = int(max(0, grace_sec - elapsed))
+                        print(f"{C_YELLOW}  [BOOTING] {acc['name']:<18} | {pkg} -> Waiting for game join ({remain}s grace left){C_RESET}")
+                    elif ingame is None:
+                        print(f"{C_YELLOW}  [WARN] {acc['name']:<18} | {pkg} -> Presence API unavailable, keeping running tab{C_RESET}")
+                    else:
+                        kill_and_rejoin_pkg(pkg, cfg["game_id"], acc, reason="Bị văng khỏi phòng / Mất kết nối")
+                        last_launch[pkg] = time.time()
+                        time.sleep(6)
                 else:
-                    if err279 or not pid:
+                    if err279 or (not pid and elapsed >= 8):
                         reason = "Phát hiện lỗi Error 279" if err279 else "Tiến trình App đã tắt"
                         kill_and_rejoin_pkg(pkg, cfg["game_id"], None, reason=reason)
+                        last_launch[pkg] = time.time()
                         time.sleep(6)
                     else:
                         print(f"{C_GREEN}{C_BOLD}  [✔ RUNNING] {pkg} (PID: {pid}) -> Giữ nguyên tab, App đang chạy ổn định{C_RESET}")
-            
+
             time.sleep(cfg.get("delay", 20))
     except KeyboardInterrupt:
         print(f"\n{C_YELLOW}{C_BOLD}  [!] Đã dừng chế độ Auto-Rejoin.{C_RESET}")
@@ -321,7 +735,7 @@ while True:
     
     print(f"{C_CYAN}{C_BOLD}╔════════════════════════════════════════════════════════════════════════════╗{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║                                                                            ║{C_RESET}")
-    print(f"{C_CYAN}{C_BOLD}║               ⚡  BAOTUE REJOIN PRO - CLOUDPHONE EDITION  ⚡               ║{C_RESET}")
+    print(f"{C_CYAN}{C_BOLD}║               TUE GAY               ║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║                                                                            ║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}╠════════════════════════════════════════════════════════════════════════════╣{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║                                                                            ║{C_RESET}")
@@ -425,6 +839,8 @@ while True:
         print(f"{C_CYAN}{C_BOLD}╔════════════════════════════════════════════════════════════════════════════╗{C_RESET}")
         print(f"{C_CYAN}{C_BOLD}║              NHẬP HÀNG LOẠT COOKIE & TỰ ĐỘNG LOGIN VÀO APP                 ║{C_RESET}")
         print(f"{C_CYAN}{C_BOLD}╚════════════════════════════════════════════════════════════════════════════╝{C_RESET}\n")
+        if not HAS_ROOT:
+            print(f"{C_RED}{C_BOLD}  [ERROR] Root (su) is required to inject cookies into Roblox WebView DB.{C_RESET}\n")
         saved_pkgs = cfg.get("packages", [])
         if not saved_pkgs:
             print(f"{C_RED}{C_BOLD}  [!] Bạn chưa thêm Package nào! Vui lòng vào mục [2] trước.{C_RESET}")
@@ -450,7 +866,9 @@ while True:
                 if line.strip().upper() == "END":
                     break
                 if not line.strip():
-                    break
+                    if lines:
+                        break
+                    continue
                 lines.append(line.strip())
             except EOFError:
                 break
@@ -479,8 +897,11 @@ while True:
                 save_cfg(cfg)
                 
                 print(f"  {C_GREEN}[✔] Gắn thành công: {C_PURPLE}{uname}{C_GREEN} ➔ {target_pkg}{C_RESET}")
-                launch_package_tab(target_pkg, cfg["game_id"], new_acc, is_rejoin=False)
-                success_count += 1
+                launched = launch_package_tab(
+                    target_pkg, cfg["game_id"], new_acc, is_rejoin=False, force_inject=True
+                )
+                if launched:
+                    success_count += 1
                 time.sleep(4)
             else:
                 print(f"  {C_RED}[✖] Cookie thứ {idx+1} không hợp lệ hoặc đã chết, bỏ qua.{C_RESET}")
@@ -506,7 +927,7 @@ while True:
         os.system("clear")
         print(f"{C_YELLOW}{C_BOLD}  [⏳] Đang ép dừng toàn bộ tab Roblox đã set...{C_RESET}")
         for item in cfg.get("packages", []):
-            exec_shell(f"am force-stop {item['pkg']}")
+            exec_shell(f"am force-stop {shlex.quote(item['pkg'])}")
         print(f"\n{C_GREEN}{C_BOLD}  [✔] ĐÃ ĐÓNG XONG TOÀN BỘ TAB!{C_RESET}")
         input(f"\n{C_DIM}  Bấm Enter để quay lại...{C_RESET}")
         
@@ -528,15 +949,20 @@ while True:
                 pkg = item["pkg"]
                 is_active = item.get("active", True)
                 acc = acc_map.get(pkg)
-                pid = run_shell(f"pidof {pkg}").strip()
+                pid = run_shell(f"pidof {shlex.quote(pkg)}").strip()
                 
                 mode_str = f"{C_GREEN}{C_BOLD}✔ BẬT CHẠY{C_RESET}" if is_active else f"{C_RED}{C_BOLD}✖ ĐANG TẮT{C_RESET}"
                 app_str = f"{C_GREEN}{C_BOLD}ĐANG MỞ (PID: {pid}){C_RESET}" if pid else f"{C_RED}{C_BOLD}ĐÃ ĐÓNG (OFFLINE){C_RESET}"
                 
                 if acc:
-                    ig = is_in_game(acc["uid"])
+                    ig = is_in_game(acc["uid"], acc.get("cookie"))
                     acc_str = f"{C_PURPLE}{C_BOLD}{acc['name']}{C_RESET} (ID: {acc['uid']})"
-                    game_str = f"{C_GREEN}{C_BOLD}🎮 ĐANG TRONG GAME (IN-GAME){C_RESET}" if ig else f"{C_RED}{C_BOLD}❌ MẤT KẾT NỐI / NGOÀI SẢNH{C_RESET}"
+                    if ig is True:
+                        game_str = f"{C_GREEN}{C_BOLD}🎮 ĐANG TRONG GAME (IN-GAME){C_RESET}"
+                    elif ig is None:
+                        game_str = f"{C_YELLOW}{C_BOLD}[WARN] Presence API unavailable{C_RESET}"
+                    else:
+                        game_str = f"{C_RED}{C_BOLD}❌ MẤT KẾT NỐI / NGOÀI SẢNH{C_RESET}"
                 else:
                     acc_str = f"{C_DIM}Chưa gắn Cookie (Chạy theo App){C_RESET}"
                     game_str = f"{C_YELLOW}{C_BOLD}⚠ Không check được API (Chưa gắn Cookie){C_RESET}"
@@ -574,5 +1000,4 @@ while True:
         
     elif choice == "0":
         os.system("clear")
-        print(f"{C_CYAN}{C_BOLD}Hẹn gặp lại bạn!{C_RESET}")
-        break
+        print(f"{C_CYAN}{C_BOLD}Hẹn gặp lại bạn!{C_RES... (Còn 1 KB)
