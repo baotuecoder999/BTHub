@@ -1,3 +1,6 @@
+import sys
+sys.path.append("/data/data/com.termux/files/usr/lib/python3.11/site-packages")
+sys.path.append("/data/data/com.termux/files/usr/lib/python3.12/site-packages")
 import os
 import time
 import json
