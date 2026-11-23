@@ -1,12 +1,60 @@
 import sys
-sys.path.append("/data/data/com.termux/files/usr/lib/python3.11/site-packages")
-sys.path.append("/data/data/com.termux/files/usr/lib/python3.12/site-packages")
+import glob
+
+# Tự động nạp mọi thư viện site-packages của Python trong Termux
+for _p in glob.glob("/data/data/com.termux/files/usr/lib/python*/site-packages"):
+    if _p not in sys.path:
+        sys.path.append(_p)
+for _p in glob.glob("/data/data/com.termux/files/usr/local/lib/python*/site-packages"):
+    if _p not in sys.path:
+        sys.path.append(_p)
+
 import os
 import time
 import json
-import requests
 
-CFG_PATH = "/sdcard/Download/baotue_config.json"
+try:
+    import requests
+except ImportError:
+    os.system("pip install --break-system-packages --no-cache-dir requests >/dev/null 2>&1 || pkg install -y python-requests >/dev/null 2>&1")
+    import requests
+
+def get_cfg_path():
+    sd_dir = "/sdcard/Download"
+    try:
+        os.makedirs(sd_dir, exist_ok=True)
+        test_file = os.path.join(sd_dir, ".baotue_write_test")
+        with open(test_file, "w") as f:
+            f.write("ok")
+        os.remove(test_file)
+        return os.path.join(sd_dir, "baotue_config.json")
+    except Exception:
+        return os.path.expanduser("~/baotue_config.json")
+
+CFG_PATH = get_cfg_path()
+
+def has_root():
+    try:
+        if os.geteuid() == 0:
+            return True
+        out = os.popen("su -c 'id -u' 2>/dev/null").read().strip()
+        return out == "0"
+    except Exception:
+        return False
+
+HAS_ROOT = has_root()
+
+def run_shell(cmd):
+    if HAS_ROOT and os.geteuid() != 0:
+        safe_cmd = cmd.replace('"', '\\"')
+        return os.popen(f'su -c "{safe_cmd}" 2>/dev/null').read()
+    return os.popen(f"{cmd} 2>/dev/null").read()
+
+def exec_shell(cmd):
+    if HAS_ROOT and os.geteuid() != 0:
+        safe_cmd = cmd.replace('"', '\\"')
+        return os.system(f'su -c "{safe_cmd}" >/dev/null 2>&1')
+    return os.system(f"{cmd} >/dev/null 2>&1")
 
 # --- BẢNG MÀU & ĐỊNH DẠNG ANSI ---
 C_CYAN = "\033[96m"
@@ -46,9 +94,9 @@ def get_system_stats():
         ram_percent = 0
 
     try:
-        top_out = os.popen("top -n 1 -b 2>/dev/null | grep -i 'cpu'").read().strip()
-        if not top_out:
-            top_out = os.popen("top -n 1 -d 1 2>/dev/null").read()
+        top_out = run_shell("top -n 1 -b | grep -i 'cpu'")
+        if not top_out.strip():
+            top_out = run_shell("top -n 1 -d 1")
         for line in top_out.splitlines():
             if "cpu" in line.lower() or "%cpu" in line.lower():
                 parts = line.replace(",", " ").split()
@@ -66,7 +114,7 @@ def get_system_stats():
 
 def scan_packages():
     found = set()
-    q_out = os.popen('cmd package query-activities -a android.intent.action.VIEW -d "roblox://" 2>/dev/null').read()
+    q_out = run_shell('cmd package query-activities -a android.intent.action.VIEW -d "roblox://"')
     for line in q_out.splitlines():
         line = line.strip()
         if line.startswith("packageName="):
@@ -75,7 +123,7 @@ def scan_packages():
                 found.add(pkg)
 
     keywords = ["roblox", "delta", "arceus", "codex", "fluxus", "hydrogen", "vega", "trigon", "evon", "noka"]
-    all_pkgs = os.popen("pm list packages -3").read().splitlines()
+    all_pkgs = run_shell("pm list packages -3").splitlines()
     for line in all_pkgs:
         pkg = line.replace("package:", "").strip()
         if any(k in pkg.lower() for k in keywords):
@@ -142,11 +190,8 @@ def get_auth_ticket(cookie):
 def has_error_279(pkg):
     """Kiểm tra log hệ thống gần nhất xem package có dính lỗi Error 279 hay không."""
     try:
-        pid = os.popen(f"pidof {pkg}").read().strip()
-        cmd = f"logcat -d -t 120 2>/dev/null"
-        logs = os.popen(cmd).read()
-        if not logs:
-            logs = os.popen("su -c 'logcat -d -t 120' 2>/dev/null").read()
+        pid = run_shell(f"pidof {pkg}").strip()
+        logs = run_shell("logcat -d -t 120")
         if not logs:
             return False
 
@@ -160,25 +205,24 @@ def has_error_279(pkg):
     return False
 
 def inject_cookie_to_pkg(pkg, cookie):
-    inject_cmd = f"""su -c '
-    mkdir -p /data/data/{pkg}/app_webview/Default/
-    cat << "EOF" > /data/data/{pkg}/app_webview/Default/Cookies
-    # Netscape HTTP Cookie File
-    .roblox.com\tTRUE\t/\tTRUE\t0\t.ROBLOSECURITY\t{cookie}
-    EOF
-    chmod -R 777 /data/data/{pkg}/app_webview/
-    ' 2>/dev/null"""
-    os.system(inject_cmd)
+    if not HAS_ROOT:
+        return
+    inject_cmd = (
+        f"mkdir -p /data/data/{pkg}/app_webview/Default/ && "
+        f"printf '# Netscape HTTP Cookie File\\n.roblox.com\\tTRUE\\t/\\tTRUE\\t0\\t.ROBLOSECURITY\\t%s\\n' '{cookie}' > /data/data/{pkg}/app_webview/Default/Cookies && "
+        f"chmod -R 777 /data/data/{pkg}/app_webview/"
+    )
+    exec_shell(inject_cmd)
 
 def open_only_app(pkg, acc_info=None):
     """Chỉ bật tab/app lên trước."""
     display_name = acc_info["name"] if acc_info else "Chưa gắn Cookie"
     print(f"{C_YELLOW}{C_BOLD}  [⬆] Đang bật tab: {pkg}{C_RESET} {C_DIM}({display_name}){C_RESET}")
-    os.system(f"am force-stop {pkg} 2>/dev/null || su -c 'am force-stop {pkg}'")
+    exec_shell(f"am force-stop {pkg}")
     time.sleep(1.5)
     if acc_info and acc_info.get("cookie"):
         inject_cookie_to_pkg(pkg, acc_info["cookie"])
-    os.system(f"monkey -p {pkg} -c android.intent.category.LAUNCHER 1 > /dev/null 2>&1 || am start -p {pkg} > /dev/null 2>&1")
+    exec_shell(f"monkey -p {pkg} -c android.intent.category.LAUNCHER 1 || am start -p {pkg}")
     print(f"{C_GREEN}  [✔] Tab {pkg} đã được bật lên!{C_RESET}")
 
 def join_game_for_pkg(pkg, game_id, acc_info=None):
@@ -191,19 +235,19 @@ def join_game_for_pkg(pkg, game_id, acc_info=None):
         ticket = get_auth_ticket(cookie)
         if ticket:
             url = f"roblox://placeId={game_id}&ticket={ticket}"
-            os.system(f'am start -p {pkg} -a android.intent.action.VIEW -d "{url}" > /dev/null 2>&1')
+            exec_shell(f'am start -p {pkg} -a android.intent.action.VIEW -d "{url}"')
             print(f"{C_GREEN}{C_BOLD}  [✔] Đã gửi vé Cookie & join Game {game_id} cho {pkg}!{C_RESET}")
             return
 
     url_direct = f"roblox://placeId={game_id}"
-    os.system(f'am start -p {pkg} -a android.intent.action.VIEW -d "{url_direct}" > /dev/null 2>&1')
+    exec_shell(f'am start -p {pkg} -a android.intent.action.VIEW -d "{url_direct}"')
     print(f"{C_GREEN}{C_BOLD}  [✔] Đã gửi lệnh join Game ID {game_id} cho {pkg}!{C_RESET}")
 
 def kill_and_rejoin_pkg(pkg, game_id, acc_info=None, reason="Mất kết nối"):
     """Kill đúng tab đang lỗi và rejoin lại tab đó."""
     display_name = acc_info["name"] if acc_info else pkg
     print(f"\n{C_RED}{C_BOLD}  [🛑 KILL & REJOIN] {display_name} ({pkg}) -> Lý do: {reason}{C_RESET}")
-    os.system(f"am force-stop {pkg} 2>/dev/null || su -c 'am force-stop {pkg}'")
+    exec_shell(f"am force-stop {pkg}")
     time.sleep(2)
     open_only_app(pkg, acc_info)
     time.sleep(3)
@@ -258,7 +302,7 @@ def run_auto_rejoin(cfg):
             print(f"{C_CYAN}{C_BOLD}  [⏰ KIỂM TRA LÚC: {time.strftime('%H:%M:%S')}]{C_RESET}\n")
             for pkg in active_pkgs:
                 acc = acc_map.get(pkg)
-                pid = os.popen(f"pidof {pkg}").read().strip()
+                pid = run_shell(f"pidof {pkg}").strip()
                 err279 = has_error_279(pkg)
                 
                 if acc and acc.get("uid"):
@@ -293,6 +337,7 @@ while True:
     pkgs_list = cfg.get("packages", [])
     active_count = sum(1 for p in pkgs_list if p.get("active", True))
     cpu_usage, ram_usage = get_system_stats()
+    mode_label = "ROOT (su)" if HAS_ROOT else "NON-ROOT"
     
     print(f"{C_CYAN}{C_BOLD}╔════════════════════════════════════════════════════════════════════════════╗{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║                                                                            ║{C_RESET}")
@@ -301,7 +346,7 @@ while True:
     print(f"{C_CYAN}{C_BOLD}╠════════════════════════════════════════════════════════════════════════════╣{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║                                                                            ║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║{C_RESET}   {C_YELLOW}{C_BOLD}• ID GAME MỤC TIÊU     :{C_RESET}  {C_GREEN}{C_BOLD}{cfg['game_id']:<47}{C_RESET}{C_CYAN}{C_BOLD}║{C_RESET}")
-    print(f"{C_CYAN}{C_BOLD}║{C_RESET}   {C_YELLOW}{C_BOLD}• HIỆU SUẤT THIẾT BỊ   :{C_RESET}  {C_PURPLE}{C_BOLD}{f'CPU: {cpu_usage}  |  RAM: {ram_usage}':<47}{C_RESET}{C_CYAN}{C_BOLD}║{C_RESET}")
+    print(f"{C_CYAN}{C_BOLD}║{C_RESET}   {C_YELLOW}{C_BOLD}• HIỆU SUẤT THIẾT BỊ   :{C_RESET}  {C_PURPLE}{C_BOLD}{f'CPU: {cpu_usage}  |  RAM: {ram_usage}  [{mode_label}]':<47}{C_RESET}{C_CYAN}{C_BOLD}║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║{C_RESET}   {C_YELLOW}{C_BOLD}• PACKAGE CLOUDPHONE   :{C_RESET}  {C_WHITE}{C_BOLD}{f'{active_count} đang BẬT  /  {len(pkgs_list)} đã lưu':<47}{C_RESET}{C_CYAN}{C_BOLD}║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║{C_RESET}   {C_YELLOW}{C_BOLD}• TÀI KHOẢN COOKIE     :{C_RESET}  {C_WHITE}{C_BOLD}{str(len(cfg['accounts'])) + ' tài khoản đã liên kết':<47}{C_RESET}{C_CYAN}{C_BOLD}║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║                                                                            ║{C_RESET}")
@@ -353,7 +398,7 @@ while True:
             if sub == "0":
                 break
             elif sub.upper() in ["A", "D"]:
-                detected = scan_packages() if sub.upper() == "A" else sorted([p.replace("package:", "").strip() for p in os.popen("pm list packages -3").read().splitlines() if p.strip()])
+                detected = scan_packages() if sub.upper() == "A" else sorted([p.replace("package:", "").strip() for p in run_shell("pm list packages -3").splitlines() if p.strip()])
                 
                 print(f"\n{C_GREEN}{C_BOLD}  [+] TÌM THẤY {len(detected)} GÓI ỨNG DỤNG:{C_RESET}\n")
                 for idx, p in enumerate(detected):
@@ -481,7 +526,7 @@ while True:
         os.system("clear")
         print(f"{C_YELLOW}{C_BOLD}  [⏳] Đang ép dừng toàn bộ tab Roblox đã set...{C_RESET}")
         for item in cfg.get("packages", []):
-            os.system(f"am force-stop {item['pkg']} 2>/dev/null || su -c 'am force-stop {item['pkg']}'")
+            exec_shell(f"am force-stop {item['pkg']}")
         print(f"\n{C_GREEN}{C_BOLD}  [✔] ĐÃ ĐÓNG XONG TOÀN BỘ TAB!{C_RESET}")
         input(f"\n{C_DIM}  Bấm Enter để quay lại...{C_RESET}")
         
@@ -503,7 +548,7 @@ while True:
                 pkg = item["pkg"]
                 is_active = item.get("active", True)
                 acc = acc_map.get(pkg)
-                pid = os.popen(f"pidof {pkg}").read().strip()
+                pid = run_shell(f"pidof {pkg}").strip()
                 
                 mode_str = f"{C_GREEN}{C_BOLD}✔ BẬT CHẠY{C_RESET}" if is_active else f"{C_RED}{C_BOLD}✖ ĐANG TẮT{C_RESET}"
                 app_str = f"{C_GREEN}{C_BOLD}ĐANG MỞ (PID: {pid}){C_RESET}" if pid else f"{C_RED}{C_BOLD}ĐÃ ĐÓNG (OFFLINE){C_RESET}"
