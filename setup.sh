@@ -4,7 +4,7 @@ echo "=================================================="
 echo "   DANG CAI DAT & KHOI CHAY TOOL BAOTUE.PY"
 echo "=================================================="
 
-GH_TOKEN="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"
+GH_TOKEN="$1"
 if [ -z "$GH_TOKEN" ]; then
     echo "[LOI] Thieu GitHub Token!"
     exit 1
