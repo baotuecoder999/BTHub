@@ -169,10 +169,20 @@ def get_android_users():
     return users
 
 def get_data_dir(pkg, user_id=0):
-    """Trả về đường dẫn data directory của package, hỗ trợ multi-user."""
-    if user_id == 0:
-        return f"/data/data/{pkg}"
-    return f"/data/user/{user_id}/{pkg}"
+    """Trả về đường dẫn data directory thực tế của package, hỗ trợ multi-user & clone."""
+    primary = f"/data/data/{pkg}" if user_id == 0 else f"/data/user/{user_id}/{pkg}"
+    if HAS_ROOT:
+        chk = run_shell(f"[ -d {shlex.quote(primary)} ] && echo ok").strip()
+        if chk == "ok":
+            return primary
+        # Kiểm tra /data/user_de hoặc đường dẫn từ dumpsys package
+        user_flag = f"--user {user_id}" if user_id != 0 else ""
+        dump = run_shell(f"dumpsys package {shlex.quote(pkg)} | grep -m 1 'dataDir='")
+        m = re.search(r'dataDir=(\S+)', dump)
+        if m and m.group(1).strip():
+            return m.group(1).strip()
+        _ = user_flag
+    return primary
 
 # ============================================================
 
@@ -480,51 +490,56 @@ def _upsert_roblosecurity_in_db(db_path, cookie):
             now_us = int(max_row[0]) + 1
         exp_us = now_us + COOKIE_TTL_DAYS * 86400 * 1_000_000
 
-        defaults = {
-            "creation_utc":     now_us,
-            "host_key":         ".roblox.com",
-            "top_frame_site_key": "",
-            "name":             ".ROBLOSECURITY",
-            "value":            cookie,
-            "encrypted_value":  b"",
-            "path":             "/",
-            "expires_utc":      exp_us,
-            "is_secure":        1,
-            "is_httponly":      1,
-            "last_access_utc":  now_us,
-            "has_expires":      1,
-            "is_persistent":    1,
-            "priority":         1,
-            "samesite":         -1,
-            "source_scheme":    2,
-            "source_port":      443,
-            "is_same_party":    0,
-            "last_update_utc":  now_us,
-            "source_type":      0,
-            "has_cross_site_ancestor": 0,
-        }
-
-        cols = []
-        vals = []
-        for _cid, name, ctype, _notnull, _dflt, _pk in col_info:
-            cols.append(name)
-            if name in defaults:
-                vals.append(defaults[name])
-            else:
-                ct = (ctype or "").upper()
-                if "BLOB" in ct:
-                    vals.append(b"")
-                elif "CHAR" in ct or "TEXT" in ct or "CLOB" in ct:
-                    vals.append("")
-                else:
-                    vals.append(0)
-
         cur.execute("DELETE FROM cookies WHERE name = '.ROBLOSECURITY'")
-        placeholders = ",".join("?" for _ in cols)
-        cur.execute(
-            f"INSERT OR REPLACE INTO cookies ({','.join(cols)}) VALUES ({placeholders})",
-            vals,
-        )
+
+        # Chèn cho cả top_frame_site_key rỗng và https://roblox.com với samesite=0 (SameSite=None)
+        for idx, top_site in enumerate(("", "https://roblox.com")):
+            ts = now_us + idx
+            defaults = {
+                "creation_utc":            ts,
+                "host_key":                ".roblox.com",
+                "top_frame_site_key":      top_site,
+                "name":                    ".ROBLOSECURITY",
+                "value":                   cookie,
+                "encrypted_value":         b"",
+                "path":                    "/",
+                "expires_utc":             exp_us,
+                "is_secure":               1,
+                "is_httponly":             1,
+                "last_access_utc":         ts,
+                "has_expires":             1,
+                "is_persistent":           1,
+                "priority":                1,
+                "samesite":                0,
+                "source_scheme":           2,
+                "source_port":             443,
+                "is_same_party":           0,
+                "last_update_utc":         ts,
+                "source_type":             0,
+                "has_cross_site_ancestor": 0,
+            }
+
+            cols = []
+            vals = []
+            for _cid, name, ctype, _notnull, _dflt, _pk in col_info:
+                cols.append(name)
+                if name in defaults:
+                    vals.append(defaults[name])
+                else:
+                    ct = (ctype or "").upper()
+                    if "BLOB" in ct:
+                        vals.append(b"")
+                    elif "CHAR" in ct or "TEXT" in ct or "CLOB" in ct:
+                        vals.append("")
+                    else:
+                        vals.append(0)
+
+            placeholders = ",".join("?" for _ in cols)
+            cur.execute(
+                f"INSERT OR REPLACE INTO cookies ({','.join(cols)}) VALUES ({placeholders})",
+                vals,
+            )
+
         con.commit()
 
         check = cur.execute("PRAGMA integrity_check").fetchone()
@@ -579,7 +594,7 @@ def _bootstrap_webview_cookies(pkg, cookies_path, user_id=0):
     else:
         exec_shell(f"monkey -p {q_pkg} -c android.intent.category.LAUNCHER 1")
 
-    for _ in range(8):
+    for _ in range(10):
         time.sleep(1.0)
         sz = run_shell(f"stat -c '%s' {q_ck}").strip()
         if sz.isdigit() and int(sz) >= 4096:
@@ -711,7 +726,7 @@ def inject_cookie_to_pkg(pkg, cookie, user_id=0):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 def launch_and_join_single_tab(pkg, game_id, acc_info=None, is_rejoin=False, force_inject=False, user_id=0):
-    """Khởi động từng tab riêng lẻ và join thẳng vào Game ID đã set."""
+    """Khởi động từng tab riêng lẻ, đồng bộ phiên đăng nhập và join thẳng vào Game ID đã set."""
     display_name = acc_info["name"] if acc_info else "Chưa gắn Cookie"
     action_text  = "REJOIN & JOIN GAME" if is_rejoin else "KHỞI ĐỘNG & JOIN GAME"
     cloud_name   = CLOUD_PHONE_PKGS.get(pkg, "")
@@ -729,17 +744,30 @@ def launch_and_join_single_tab(pkg, game_id, acc_info=None, is_rejoin=False, for
     exec_shell(f"am force-stop {user_flag} {q_pkg}")
     time.sleep(1.2)
 
+    injected_fresh = False
     if acc_info and acc_info.get("cookie"):
-        cookie     = normalize_cookie(acc_info["cookie"])
+        cookie      = normalize_cookie(acc_info["cookie"])
         need_inject = force_inject or not is_session_synced(pkg, acc_info.get("uid"), cookie, user_id)
         if need_inject:
             ok, err = inject_cookie_to_pkg(pkg, cookie, user_id)
             if not ok:
                 print(f"{C_RED}{C_BOLD}  [ERROR] Cookie inject failed for {pkg}: {err}{C_RESET}")
                 return False
+            injected_fresh = True
             print(f"{C_GREEN}  [OK] Injected WebView SQLite cookie for {pkg}{C_RESET}")
         else:
             print(f"{C_DIM}  [OK] Existing session already synced for {pkg}{C_RESET}")
+
+    # Mồi mở app trước 5s khi vừa inject cookie mới để client đồng bộ WebView -> appStorage.json / prefs.xml
+    if injected_fresh:
+        act = run_shell(f"cmd package resolve-activity --brief {user_flag} {q_pkg}").splitlines()
+        component = act[-1].strip() if act else ""
+        if "/" in component and not component.lower().startswith("no "):
+            exec_shell(f"am start {user_flag} -n {shlex.quote(component)}")
+        else:
+            exec_shell(f"monkey -p {q_pkg} -c android.intent.category.LAUNCHER 1")
+        print(f"{C_CYAN}  [⏳] Đang đồng bộ phiên đăng nhập Native cho {pkg} (5s)...{C_RESET}")
+        time.sleep(5.0)
 
     url_direct = f"roblox://placeId={game_id}"
     rc = exec_shell(
