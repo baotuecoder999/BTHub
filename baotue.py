@@ -18,7 +18,10 @@ import subprocess
 import tempfile
 import time
 import json
+import base64
+import hashlib
 import urllib.parse
+from datetime import datetime
 
 try:
     import requests
@@ -39,6 +42,7 @@ def get_cfg_path():
         return os.path.expanduser("~/baotue_config.json")
 
 CFG_PATH = get_cfg_path()
+KEY_CACHE_PATH = os.path.join(os.path.dirname(CFG_PATH), ".baotue_key_cache.json")
 
 def _is_root_uid():
     geteuid = getattr(os, "geteuid", None)
@@ -104,6 +108,184 @@ C_WHITE  = "\033[97m"
 C_BOLD   = "\033[1m"
 C_DIM    = "\033[2m"
 C_RESET  = "\033[0m"
+
+# ============================================================
+# CẤU HÌNH KẾT NỐI GITHUB + DISCORD RESET HWID
+# ============================================================
+GITHUB_TOKEN   = "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"
+GITHUB_OWNER   = "baotuecoder999"
+GITHUB_REPO    = "KeyToolsRejoin"
+GITHUB_PATH    = "keys.json"
+GITHUB_BRANCH  = "main"
+DISCORD_INVITE = "https://discord.gg/SNgfpVgsd"
+
+def get_device_hwid():
+    """Tạo HWID ưu tiên thông số phần cứng CloudPhone để hạn chế đổi HWID khi Clear Data."""
+    serial_no  = run_shell("getprop ro.serialno").strip()
+    boot_sn    = run_shell("getprop ro.boot.serialno").strip()
+    board_id   = run_shell("getprop ro.product.board").strip()
+    hw_name    = run_shell("getprop ro.hardware").strip()
+    android_id = run_shell("settings get secure android_id").strip()
+
+    # Nếu CloudPhone có serial cố định thì dùng serial + board; ngược lại fallback sang android_id
+    if serial_no and serial_no.lower() not in ("unknown", "none", "0123456789abcdef"):
+        raw = f"SN:{serial_no}|BOOT:{boot_sn}|BOARD:{board_id}|HW:{hw_name}"
+    else:
+        raw = f"AID:{android_id}|BOARD:{board_id}|HW:{hw_name}"
+
+    return hashlib.sha256(f"BAOTUE_CLOUD_HWID:{raw}".encode("utf-8")).hexdigest()[:16].upper()
+
+def _load_local_saved_key():
+    if os.path.isfile(KEY_CACHE_PATH):
+        try:
+            with open(KEY_CACHE_PATH, "r", encoding="utf-8") as f:
+                return json.load(f).get("key", "").strip()
+        except Exception:
+            pass
+    return ""
+
+def _save_local_saved_key(key_str):
+    try:
+        with open(KEY_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump({"key": key_str.strip()}, f)
+    except Exception:
+        pass
+
+def _gh_fetch_db():
+    url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{GITHUB_PATH}?ref={GITHUB_BRANCH}&_t={int(time.time())}"
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+    }
+    r = requests.get(url, headers=headers, timeout=12)
+    r.raise_for_status()
+    payload = r.json()
+    db = json.loads(base64.b64decode(payload["content"]).decode("utf-8"))
+    return db, payload["sha"]
+
+def _gh_commit_db(db, sha, msg):
+    url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{GITHUB_PATH}"
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+    }
+    encoded = base64.b64encode(json.dumps(db, indent=2).encode("utf-8")).decode("utf-8")
+    body = {
+        "message": msg,
+        "content": encoded,
+        "sha": sha,
+        "branch": GITHUB_BRANCH,
+    }
+    r = requests.put(url, headers=headers, json=body, timeout=12)
+    return r.status_code in (200, 201)
+
+def verify_and_bind_key_online(input_key, current_hwid):
+    key = input_key.strip()
+    if not key:
+        return False, "Vui lòng nhập Key!", None
+
+    for _ in range(3):
+        try:
+            db, sha = _gh_fetch_db()
+        except Exception as e:
+            return False, f"Không thể kết nối máy chủ xác thực Key ({e})", None
+
+        if key not in db:
+            return False, "Key không tồn tại hoặc đã bị thu hồi!", None
+
+        rec        = db[key]
+        days       = int(rec.get("days", 7))
+        bound_hwid = str(rec.get("hwid", "")).strip().upper()
+        act_ts     = float(rec.get("activated_ts", 0))
+        exp_ts     = float(rec.get("expire_ts", 0))
+        now_ts     = time.time()
+        need_push  = False
+
+        # 1. Kiểm tra nếu Key đã từng kích hoạt thì check hết hạn trước
+        if exp_ts > 0 and now_ts >= exp_ts:
+            exp_dt = datetime.fromtimestamp(exp_ts).strftime("%d/%m/%Y %H:%M")
+            return False, f"Key đã hết hạn sử dụng vào lúc {exp_dt}!", None
+
+        # 2. Kiểm tra 1 Key - 1 HWID (Hỗ trợ cả kích hoạt mới & kích hoạt lại sau khi Reset HWID trên Discord)
+        if not bound_hwid:
+            rec["hwid"] = current_hwid
+            if exp_ts == 0:
+                rec["activated_ts"] = now_ts
+                rec["expire_ts"] = now_ts + (days * 86400)
+            need_push = True
+        elif bound_hwid != current_hwid:
+            return False, (
+                f"Key đang khóa với thiết bị khác (HWID: {bound_hwid})!\n"
+                f"      ➔ Nếu bạn mới đổi CloudPhone, hãy vào Discord ({DISCORD_INVITE})\n"
+                f"         và dùng lệnh: /resethwid key:{key}"
+            ), None
+
+        if need_push:
+            if not _gh_commit_db(db, sha, f"Bind HWID {current_hwid} to {key}"):
+                time.sleep(0.5)
+                continue
+
+        _save_local_saved_key(key)
+        final_exp = float(rec["expire_ts"])
+        remain_sec  = max(0, int(final_exp - now_ts))
+        remain_days = remain_sec // 86400
+        remain_hrs  = (remain_sec % 86400) // 3600
+        exp_str     = datetime.fromtimestamp(final_exp).strftime("%d/%m/%Y %H:%M")
+
+        info_out = {
+            "key":        key,
+            "hwid":       current_hwid,
+            "days":       days,
+            "expire_str": exp_str,
+            "remain_str": f"{remain_days} ngày {remain_hrs} giờ",
+        }
+        return True, f"Xác thực thành công gói {days} ngày! Hạn dùng: {exp_str}", info_out
+
+    return False, "Máy chủ đang bận đồng bộ, vui lòng thử lại sau vài giây!", None
+
+def require_login_key():
+    hwid = get_device_hwid()
+    saved_key = _load_local_saved_key()
+
+    if saved_key:
+        print(f"\n{C_YELLOW}  [⏳] Đang kiểm tra bản quyền tự động với máy chủ...{C_RESET}")
+        ok, _, info = verify_and_bind_key_online(saved_key, hwid)
+        if ok:
+            return info
+        else:
+            _save_local_saved_key("")
+
+    attempts = 0
+    max_attempts = 5
+
+    while attempts < max_attempts:
+        os.system("clear")
+        print(f"{C_CYAN}{C_BOLD}╔════════════════════════════════════════════════════════════════════════════╗{C_RESET}")
+        print(f"{C_CYAN}{C_BOLD}║                  🔐 XÁC THỰC KEY BẢN QUYỀN (1 KEY - 1 HWID) 🔐              ║{C_RESET}")
+        print(f"{C_CYAN}{C_BOLD}╚════════════════════════════════════════════════════════════════════════════╝{C_RESET}\n")
+        print(f"  {C_YELLOW}{C_BOLD}• MÃ THIẾT BỊ (HWID) :{C_RESET}  {C_PURPLE}{C_BOLD}{hwid}{C_RESET}")
+        print(f"  {C_YELLOW}{C_BOLD}• ĐỔI CLOUDPHONE     :{C_RESET}  {C_WHITE}Vào Discord ({DISCORD_INVITE}) gõ /resethwid{C_RESET}")
+        print(f"  {C_YELLOW}{C_BOLD}• TRẠNG THÁI         :{C_RESET}  {C_RED}{C_BOLD}CHƯA NHẬP KEY (Còn {max_attempts - attempts} lần thử){C_RESET}\n")
+        print(f"{C_CYAN}──────────────────────────────────────────────────────────────────────────────{C_RESET}\n")
+
+        user_key = input(f"{C_GREEN}{C_BOLD}  ➜ NHẬP KEY ĐỂ MỞ KHÓA TOOL (Gõ '0' để thoát): {C_RESET}").strip()
+        if user_key == "0":
+            print(f"\n{C_YELLOW}  Đã thoát chương trình.{C_RESET}\n")
+            sys.exit(0)
+
+        print(f"\n{C_YELLOW}  [⏳] Đang kiểm tra Key & đồng bộ HWID...{C_RESET}")
+        ok, msg, info = verify_and_bind_key_online(user_key, hwid)
+        if ok:
+            print(f"\n{C_GREEN}{C_BOLD}  [✔] {msg}{C_RESET}")
+            time.sleep(1.5)
+            return info
+        else:
+            attempts += 1
+            print(f"\n{C_RED}{C_BOLD}  [✖] LỖI KEY: {msg}{C_RESET}")
+            time.sleep(2.5)
+
+    print(f"\n{C_RED}{C_BOLD}  [!] Nhập sai quá {max_attempts} lần. Đóng chương trình!{C_RESET}\n")
+    sys.exit(1)
 
 # ============================================================
 # CLOUD PHONE SUPPORT — Danh sách nhận diện các Cloud Phone
@@ -890,6 +1072,11 @@ def run_auto_rejoin(cfg):
         time.sleep(1.5)
 
 # ============================================================
+# KIỂM TRA KEY TRƯỚC KHI VÀO MENU CHÍNH
+# ============================================================
+LICENSE_INFO = require_login_key()
+
+# ============================================================
 # MAIN MENU LOOP
 # ============================================================
 while True:
@@ -900,9 +1087,17 @@ while True:
     cpu_usage, ram_usage = get_system_stats()
     mode_label = "ROOT (su)" if HAS_ROOT else "NON-ROOT"
 
+    # Kiểm tra lại thời hạn Key theo thời gian thực
+    _, _, live_info = verify_and_bind_key_online(LICENSE_INFO["key"], LICENSE_INFO["hwid"])
+    if not live_info:
+        print(f"\n{C_RED}{C_BOLD}  [!] Key của bạn đã hết hạn, bị thu hồi hoặc đã Reset sang HWID khác!{C_RESET}")
+        _save_local_saved_key("")
+        sys.exit(1)
+    LICENSE_INFO = live_info
+
     print(f"{C_CYAN}{C_BOLD}╔════════════════════════════════════════════════════════════════════════════╗{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║                                                                            ║{C_RESET}")
-    print(f"{C_CYAN}{C_BOLD}║                           TUE GAY                                         ║{C_RESET}")
+    print(f"{C_CYAN}{C_BOLD}║                           BAOTUE <3                                        ║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║                                                                            ║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}╠════════════════════════════════════════════════════════════════════════════╣{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║                                                                            ║{C_RESET}")
@@ -910,6 +1105,7 @@ while True:
     print(f"{C_CYAN}{C_BOLD}║{C_RESET}   {C_YELLOW}{C_BOLD}• HIỆU SUẤT THIẾT BỊ   :{C_RESET}  {C_PURPLE}{C_BOLD}{f'CPU: {cpu_usage}  |  RAM: {ram_usage}  [{mode_label}]':<47}{C_RESET}{C_CYAN}{C_BOLD}║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║{C_RESET}   {C_YELLOW}{C_BOLD}• PACKAGE CLOUDPHONE   :{C_RESET}  {C_WHITE}{C_BOLD}{f'{active_count} đang BẬT  /  {len(pkgs_list)} đã lưu':<47}{C_RESET}{C_CYAN}{C_BOLD}║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║{C_RESET}   {C_YELLOW}{C_BOLD}• TÀI KHOẢN COOKIE     :{C_RESET}  {C_WHITE}{C_BOLD}{str(len(cfg['accounts'])) + ' tài khoản đã liên kết':<47}{C_RESET}{C_CYAN}{C_BOLD}║{C_RESET}")
+    print(f"{C_CYAN}{C_BOLD}║{C_RESET}   {C_YELLOW}{C_BOLD}• HWID / THỜI HẠN KEY  :{C_RESET}  {C_CYAN}{C_BOLD}{f'{LICENSE_INFO[\"hwid\"]} | Còn {LICENSE_INFO[\"remain_str\"]}':<47}{C_RESET}{C_CYAN}{C_BOLD}║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║                                                                            ║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}╚════════════════════════════════════════════════════════════════════════════╝{C_RESET}")
 
