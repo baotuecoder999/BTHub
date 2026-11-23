@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 import time
 import json
+import urllib.parse
 
 try:
     import requests
@@ -108,34 +109,27 @@ C_RESET  = "\033[0m"
 # CLOUD PHONE SUPPORT — Danh sách nhận diện các Cloud Phone
 # ============================================================
 CLOUD_PHONE_PKGS = {
-    # VMOS
     "com.vmos.pro":                     "VMOS Pro",
     "com.vmos.classic":                 "VMOS Classic",
     "com.vmos.app":                     "VMOS",
-    # Redfinger
     "com.redfinger.android":            "Redfinger",
     "com.redfinger.android.hd":         "Redfinger HD",
     "com.redfinger.cloud":              "Redfinger Cloud",
-    # UGPhone
     "com.ugphone.android":              "UGPhone",
     "com.ugphone.cloud":                "UGPhone Cloud",
     "com.ugphone.app":                  "UGPhone",
-    # 90Phone / CloudPhone
     "com.nnodes.phone90":               "90Phone",
     "com.nubia.cloudphone":             "CloudPhone",
     "com.nt.cloudphone":                "CloudPhone",
-    # Parallel Space / Dual Space
     "com.lbe.parallel.intl":            "Parallel Space",
     "com.parallel.space.lite":          "Parallel Space Lite",
     "com.excelliance.multiaccount":     "Dual Space",
     "com.excelliance.dualaid":          "Dual Space Pro",
-    # Virtual Space / Clone
     "com.phone.virtual":                "Virtual Phone",
     "net.lostium.go":                   "Go Multi",
     "com.meizu.flyme.multiplex":        "Multiplex",
     "com.polestar.clone":               "Clone Phone",
     "com.smartphone.phone90":           "Smart Phone 90",
-    # NoxPlayer / LDPlayer (trên thiết bị x86)
     "com.android.nox":                  "NoxPlayer",
     "com.bignox.app.store.hd":          "NoxPlayer Store",
     "com.vphonegaga.titan":             "VPhoneGaga",
@@ -154,7 +148,6 @@ CLOUD_PHONE_KEYWORDS = [
 ]
 
 def get_android_users():
-    """Lấy danh sách tất cả Android user (hỗ trợ virtual space / multi-user profile)."""
     users = [0]
     try:
         out = run_shell("pm list users")
@@ -169,22 +162,19 @@ def get_android_users():
     return users
 
 def get_data_dir(pkg, user_id=0):
-    """Trả về đường dẫn data directory thực tế của package, hỗ trợ multi-user & clone."""
+    """Trả về đường dẫn data directory thực tế của mọi client & bản clone."""
     primary = f"/data/data/{pkg}" if user_id == 0 else f"/data/user/{user_id}/{pkg}"
     if HAS_ROOT:
-        chk = run_shell(f"[ -d {shlex.quote(primary)} ] && echo ok").strip()
-        if chk == "ok":
+        if run_shell(f"[ -d {shlex.quote(primary)} ] && echo ok").strip() == "ok":
             return primary
-        # Kiểm tra /data/user_de hoặc đường dẫn từ dumpsys package
-        user_flag = f"--user {user_id}" if user_id != 0 else ""
+        user_alt = f"/data/user/{user_id}/{pkg}"
+        if run_shell(f"[ -d {shlex.quote(user_alt)} ] && echo ok").strip() == "ok":
+            return user_alt
         dump = run_shell(f"dumpsys package {shlex.quote(pkg)} | grep -m 1 'dataDir='")
         m = re.search(r'dataDir=(\S+)', dump)
         if m and m.group(1).strip():
             return m.group(1).strip()
-        _ = user_flag
     return primary
-
-# ============================================================
 
 def load_cfg():
     if os.path.exists(CFG_PATH):
@@ -192,7 +182,6 @@ def load_cfg():
             data = json.load(f)
             if data.get("packages") and isinstance(data["packages"][0], str):
                 data["packages"] = [{"pkg": p, "active": True, "user_id": 0} for p in data["packages"]]
-            # Migrate: thêm user_id nếu chưa có (tương thích config cũ)
             for item in data.get("packages", []):
                 if "user_id" not in item:
                     item["user_id"] = 0
@@ -236,25 +225,16 @@ def get_system_stats():
     return f"{cpu_percent}%", f"{ram_percent}%"
 
 def scan_packages(all_users=False):
-    """
-    Quét tất cả package liên quan đến Roblox, Cloud Phone và virtual environments.
-    Trả về list dict: [{"pkg": ..., "user_id": ...}, ...]
-    all_users=True: quét cả multi-user Android (virtual space như VMOS)
-    """
-    found = {}  # key="pkg@user_id" -> {"pkg": ..., "user_id": ...}
-
+    found = {}
     roblox_keywords = [
         "roblox", "delta", "arceus", "codex", "fluxus",
-        "hydrogen", "vega", "trigon", "evon", "noka",
+        "hydrogen", "vega", "trigon", "evon", "noka", "vip.",
     ]
     all_keywords = roblox_keywords + CLOUD_PHONE_KEYWORDS
-
     users = get_android_users() if all_users else [0]
 
     for user_id in users:
         user_flag = f"--user {user_id}" if user_id != 0 else ""
-
-        # Quét qua intent VIEW với roblox://
         q_out = run_shell(
             f'cmd package query-activities {user_flag} -a android.intent.action.VIEW -d "roblox://"'
         )
@@ -263,10 +243,8 @@ def scan_packages(all_users=False):
             if line.startswith("packageName="):
                 pkg = line.split("=", 1)[1].strip()
                 if pkg:
-                    key = f"{pkg}@{user_id}"
-                    found[key] = {"pkg": pkg, "user_id": user_id}
+                    found[f"{pkg}@{user_id}"] = {"pkg": pkg, "user_id": user_id}
 
-        # Quét tất cả package user đã cài
         all_pkgs = run_shell(f"pm list packages {user_flag} -3").splitlines()
         for line in all_pkgs:
             pkg = line.replace("package:", "").strip()
@@ -274,16 +252,15 @@ def scan_packages(all_users=False):
                 continue
             pkg_lower = pkg.lower()
             if any(k in pkg_lower for k in all_keywords) or pkg in CLOUD_PHONE_PKGS:
-                key = f"{pkg}@{user_id}"
-                found[key] = {"pkg": pkg, "user_id": user_id}
+                found[f"{pkg}@{user_id}"] = {"pkg": pkg, "user_id": user_id}
 
     return sorted(found.values(), key=lambda x: (x["user_id"], x["pkg"]))
 
-CHROME_EPOCH_OFFSET = 11644473600
-COOKIE_TTL_DAYS     = 365
+CHROME_EPOCH_OFFSET    = 11644473600
+COOKIE_TTL_DAYS        = 365
 ROBLOX_PREFS_USER_KEYS = ("userid_long", "username", "displayName", "under13")
 LAUNCH_GRACE_SECONDS   = 45
-ROBLOX_HTTP_UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36"
+ROBLOX_HTTP_UA         = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36"
 
 def normalize_cookie(raw_cookie):
     if not raw_cookie:
@@ -346,6 +323,8 @@ def get_auth_ticket(cookie):
         headers = {
             "User-Agent": "Roblox/WinInet",
             "Referer": "https://www.roblox.com/",
+            "Origin": "https://www.roblox.com",
+            "Content-Type": "application/json",
         }
         r1 = s.post("https://auth.roblox.com/v1/authentication-ticket", headers=headers, timeout=10)
         csrf = r1.headers.get("x-csrf-token")
@@ -357,7 +336,6 @@ def get_auth_ticket(cookie):
         return None
 
 def has_error_279(pkg, pid=None):
-    """Kiểm tra log hệ thống gần nhất xem package có dính lỗi Error 279 hay không."""
     try:
         if pid is None:
             pid = run_shell(f"pidof {shlex.quote(pkg)}").strip()
@@ -492,7 +470,6 @@ def _upsert_roblosecurity_in_db(db_path, cookie):
 
         cur.execute("DELETE FROM cookies WHERE name = '.ROBLOSECURITY'")
 
-        # Chèn cho cả top_frame_site_key rỗng và https://roblox.com với samesite=0 (SameSite=None)
         for idx, top_site in enumerate(("", "https://roblox.com")):
             ts = now_us + idx
             defaults = {
@@ -519,8 +496,7 @@ def _upsert_roblosecurity_in_db(db_path, cookie):
                 "has_cross_site_ancestor": 0,
             }
 
-            cols = []
-            vals = []
+            cols, vals = [], []
             for _cid, name, ctype, _notnull, _dflt, _pk in col_info:
                 cols.append(name)
                 if name in defaults:
@@ -541,27 +517,11 @@ def _upsert_roblosecurity_in_db(db_path, cookie):
             )
 
         con.commit()
-
         check = cur.execute("PRAGMA integrity_check").fetchone()
         if not check or check[0].lower() != "ok":
             raise RuntimeError(f"sqlite integrity_check failed: {check}")
-
-        verify = cur.execute(
-            "SELECT value FROM cookies WHERE name = '.ROBLOSECURITY' AND host_key = '.roblox.com'"
-        ).fetchone()
-        if not verify or verify[0] != cookie:
-            raise RuntimeError("injected cookie verification mismatch")
     finally:
         con.close()
-
-def _strip_prefs_user_keys(xml_text):
-    keys_pat = "|".join(re.escape(k) for k in ROBLOX_PREFS_USER_KEYS)
-    pattern = (
-        r'^[ \t]*<(?:string|long|int|boolean)\s+name="(?:'
-        + keys_pat
-        + r')"[^>]*?(?:/>|>.*?</(?:string|long|int|boolean)>)[ \t]*\r?\n?'
-    )
-    return re.sub(pattern, "", xml_text, flags=re.MULTILINE | re.DOTALL)
 
 def _pull_file_as_root(src_path, dst_path):
     uid_gid = f"{os.getuid()}:{os.getgid()}" if hasattr(os, "getuid") else "0:0"
@@ -570,6 +530,21 @@ def _pull_file_as_root(src_path, dst_path):
     cmd = f"if [ -f {q_src} ]; then cat {q_src} > {q_dst} && chown {uid_gid} {q_dst} && chmod 600 {q_dst}; fi"
     exec_shell(cmd)
     return os.path.isfile(dst_path)
+
+def _push_file_as_root(src_path, dst_path, owner, mode="660"):
+    q_src = shlex.quote(src_path)
+    q_dst = shlex.quote(dst_path)
+    q_dir = shlex.quote(os.path.dirname(dst_path))
+    q_own = shlex.quote(owner)
+    cmd = (
+        f"mkdir -p {q_dir} && "
+        f"cat {q_src} > {q_dst} && "
+        f"chown {q_own} {q_dir} {q_dst} && "
+        f"chmod 770 {q_dir} && "
+        f"chmod {mode} {q_dst} && "
+        f"(restorecon -R {q_dir} 2>/dev/null || true)"
+    )
+    return exec_shell(cmd) == 0
 
 def _pull_cookies_bundle(pkg, tmp_dir, user_id=0):
     base = f"{get_data_dir(pkg, user_id)}/app_webview/Default"
@@ -603,36 +578,91 @@ def _bootstrap_webview_cookies(pkg, cookies_path, user_id=0):
     exec_shell(f"am force-stop {user_flag} {q_pkg}")
     time.sleep(1.0)
 
-def _clean_stale_session_files(pkg, owner, tmp_dir, user_id=0):
-    base          = get_data_dir(pkg, user_id)
-    q_def         = shlex.quote(f"{base}/app_webview/Default")
-    q_app_storage = shlex.quote(f"{base}/files/appData/LocalStorage/appStorage.json")
-    q_db_dir      = shlex.quote(f"{base}/databases")
+def _sync_native_session_files(pkg, owner, tmp_dir, cookie, acc_info=None, user_id=0):
+    """
+    Ghi đồng bộ dữ liệu phiên Native cho tất cả client Roblox (gốc, Delta, Arceus, Codex, clone):
+    1. files/RobloxCookies.dat (Native C++ HTTP Cookie Store)
+    2. files/appData/LocalStorage/appStorage.json (UserId, Username, DisplayName)
+    3. shared_prefs/prefs.xml (userid_long, username, displayName)
+    """
+    base = get_data_dir(pkg, user_id)
+    q_def = shlex.quote(f"{base}/app_webview/Default")
+    q_db_dir = shlex.quote(f"{base}/databases")
+    exec_shell(f"rm -f {q_def}/Cookies-journal {q_def}/Cookies-wal {q_def}/Cookies-shm {q_db_dir}/roblox-database-default*")
 
-    exec_shell(
-        f"rm -f {q_def}/Cookies-journal {q_def}/Cookies-wal {q_def}/Cookies-shm "
-        f"{q_app_storage} {q_db_dir}/roblox-database-default*"
+    # 1. Ghi RobloxCookies.dat (định dạng Netscape HTTP Cookie File mà Roblox engine đọc)
+    exp_ts = int(time.time()) + COOKIE_TTL_DAYS * 86400
+    cookie_dat_content = (
+        "# Netscape HTTP Cookie File\n"
+        "# https://curl.se/docs/http-cookies.html\n"
+        f"#HttpOnly_.roblox.com\tTRUE\t/\tTRUE\t{exp_ts}\t.ROBLOSECURITY\t{cookie}\n"
+        f"#HttpOnly_www.roblox.com\tFALSE\t/\tTRUE\t{exp_ts}\t.ROBLOSECURITY\t{cookie}\n"
     )
+    tmp_dat = os.path.join(tmp_dir, "RobloxCookies.dat")
+    with open(tmp_dat, "w", encoding="utf-8") as f:
+        f.write(cookie_dat_content)
+    _push_file_as_root(tmp_dat, f"{base}/files/RobloxCookies.dat", owner, "660")
 
+    uid = str(acc_info.get("uid", "")) if acc_info else ""
+    uname = str(acc_info.get("name", "")) if acc_info else ""
+
+    # 2. Cập nhật appStorage.json (giữ nguyên cấu trúc nếu đã tồn tại, chỉ cập nhật thông tin user)
+    app_storage_path = f"{base}/files/appData/LocalStorage/appStorage.json"
+    tmp_storage = os.path.join(tmp_dir, "appStorage.json")
+    storage_data = {}
+    if _pull_file_as_root(app_storage_path, tmp_storage):
+        try:
+            with open(tmp_storage, "r", encoding="utf-8", errors="ignore") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    storage_data = loaded
+        except Exception:
+            storage_data = {}
+
+    if uid and uname:
+        storage_data["UserId"] = uid
+        storage_data["Username"] = uname
+        storage_data["DisplayName"] = uname
+        storage_data["IsUnder13"] = "false"
+        storage_data["BrowserTrackerId"] = storage_data.get("BrowserTrackerId", str(int(time.time() * 1000)))
+        with open(tmp_storage, "w", encoding="utf-8") as f:
+            json.dump(storage_data, f, separators=(",", ":"))
+        _push_file_as_root(tmp_storage, app_storage_path, owner, "660")
+
+    # 3. Cập nhật shared_prefs/prefs.xml với userid_long, username, displayName
     prefs_path = f"{base}/shared_prefs/prefs.xml"
     tmp_prefs  = os.path.join(tmp_dir, "prefs.xml")
+    xml_text = '<?xml version=\'1.0\' encoding=\'utf-8\' standalone=\'yes\' ?>\n<map>\n</map>\n'
     if _pull_file_as_root(prefs_path, tmp_prefs):
         try:
             with open(tmp_prefs, "r", encoding="utf-8", errors="ignore") as f:
-                orig_xml = f.read()
-            cleaned_xml = _strip_prefs_user_keys(orig_xml)
-            if cleaned_xml != orig_xml:
-                with open(tmp_prefs, "w", encoding="utf-8") as f:
-                    f.write(cleaned_xml)
-                q_tmp   = shlex.quote(tmp_prefs)
-                q_prefs = shlex.quote(prefs_path)
-                q_own   = shlex.quote(owner)
-                exec_shell(
-                    f"cat {q_tmp} > {q_prefs} && chown {q_own} {q_prefs} && "
-                    f"chmod 660 {q_prefs} && (restorecon {q_prefs} 2>/dev/null || true)"
-                )
+                read_xml = f.read()
+                if "<map" in read_xml:
+                    xml_text = read_xml
         except Exception:
             pass
+
+    keys_pat = "|".join(re.escape(k) for k in ROBLOX_PREFS_USER_KEYS)
+    pattern = (
+        r'^[ \t]*<(?:string|long|int|boolean)\s+name="(?:'
+        + keys_pat
+        + r')"[^>]*?(?:/>|>.*?</(?:string|long|int|boolean)>)[ \t]*\r?\n?'
+    )
+    cleaned_xml = re.sub(pattern, "", xml_text, flags=re.MULTILINE | re.DOTALL)
+
+    if uid and uname and "</map>" in cleaned_xml:
+        inject_tags = (
+            f'    <string name="userid_long">{uid}</string>\n'
+            f'    <string name="username">{uname}</string>\n'
+            f'    <string name="displayName">{uname}</string>\n'
+            f'    <boolean name="under13" value="false" />\n'
+            f'</map>'
+        )
+        cleaned_xml = cleaned_xml.replace("</map>", inject_tags, 1)
+
+    with open(tmp_prefs, "w", encoding="utf-8") as f:
+        f.write(cleaned_xml)
+    _push_file_as_root(tmp_prefs, prefs_path, owner, "660")
 
 def is_session_synced(pkg, expected_uid, expected_cookie, user_id=0):
     if not HAS_ROOT or not pkg or not expected_cookie:
@@ -641,25 +671,26 @@ def is_session_synced(pkg, expected_uid, expected_cookie, user_id=0):
     if not ck:
         return False
 
+    base = get_data_dir(pkg, user_id)
     if expected_uid:
-        prefs_path = f"{get_data_dir(pkg, user_id)}/shared_prefs/prefs.xml"
+        prefs_path = f"{base}/shared_prefs/prefs.xml"
         uid_line = run_shell(
             f"grep -F 'name=\"userid_long\"' {shlex.quote(prefs_path)}"
         )
-        if f'value="{expected_uid}"' not in uid_line:
+        if f'>{expected_uid}<' not in uid_line and f'value="{expected_uid}"' not in uid_line:
             return False
 
     tmp_dir = tempfile.mkdtemp(prefix="rblx_chk_")
     try:
-        tmp_db     = _pull_cookies_bundle(pkg, tmp_dir, user_id)
-        stored_ck  = _read_roblosecurity_from_db(tmp_db)
+        tmp_db = _pull_cookies_bundle(pkg, tmp_dir, user_id)
+        stored_ck = _read_roblosecurity_from_db(tmp_db)
         return stored_ck == ck
     except Exception:
         return False
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-def inject_cookie_to_pkg(pkg, cookie, user_id=0):
+def inject_cookie_to_pkg(pkg, cookie, acc_info=None, user_id=0):
     if not HAS_ROOT:
         return False, "Root (su) access is required to inject cookies"
     ck = normalize_cookie(cookie)
@@ -695,7 +726,8 @@ def inject_cookie_to_pkg(pkg, cookie, user_id=0):
         _upsert_roblosecurity_in_db(tmp_db, ck)
         expected_size = os.path.getsize(tmp_db)
 
-        _clean_stale_session_files(pkg, owner, tmp_dir, user_id)
+        # Đồng bộ đồng thời RobloxCookies.dat, appStorage.json và prefs.xml cho mọi client
+        _sync_native_session_files(pkg, owner, tmp_dir, ck, acc_info=acc_info, user_id=user_id)
 
         q_wv  = shlex.quote(webview_dir)
         q_def = shlex.quote(default_dir)
@@ -726,7 +758,7 @@ def inject_cookie_to_pkg(pkg, cookie, user_id=0):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 def launch_and_join_single_tab(pkg, game_id, acc_info=None, is_rejoin=False, force_inject=False, user_id=0):
-    """Khởi động từng tab riêng lẻ, đồng bộ phiên đăng nhập và join thẳng vào Game ID đã set."""
+    """Khởi động từng tab riêng lẻ, xác thực bằng Auth Ticket + Cookie và join thẳng vào Game ID."""
     display_name = acc_info["name"] if acc_info else "Chưa gắn Cookie"
     action_text  = "REJOIN & JOIN GAME" if is_rejoin else "KHỞI ĐỘNG & JOIN GAME"
     cloud_name   = CLOUD_PHONE_PKGS.get(pkg, "")
@@ -744,35 +776,49 @@ def launch_and_join_single_tab(pkg, game_id, acc_info=None, is_rejoin=False, for
     exec_shell(f"am force-stop {user_flag} {q_pkg}")
     time.sleep(1.2)
 
-    injected_fresh = False
+    ticket = None
     if acc_info and acc_info.get("cookie"):
         cookie      = normalize_cookie(acc_info["cookie"])
         need_inject = force_inject or not is_session_synced(pkg, acc_info.get("uid"), cookie, user_id)
         if need_inject:
-            ok, err = inject_cookie_to_pkg(pkg, cookie, user_id)
+            ok, err = inject_cookie_to_pkg(pkg, cookie, acc_info=acc_info, user_id=user_id)
             if not ok:
                 print(f"{C_RED}{C_BOLD}  [ERROR] Cookie inject failed for {pkg}: {err}{C_RESET}")
                 return False
-            injected_fresh = True
-            print(f"{C_GREEN}  [OK] Injected WebView SQLite cookie for {pkg}{C_RESET}")
+            print(f"{C_GREEN}  [OK] Đã nạp đồng bộ WebView + Native Cookie & Session cho {pkg}{C_RESET}")
         else:
-            print(f"{C_DIM}  [OK] Existing session already synced for {pkg}{C_RESET}")
+            print(f"{C_DIM}  [OK] Phiên đăng nhập đã đồng bộ sẵn cho {pkg}{C_RESET}")
 
-    # Mồi mở app trước 5s khi vừa inject cookie mới để client đồng bộ WebView -> appStorage.json / prefs.xml
-    if injected_fresh:
-        act = run_shell(f"cmd package resolve-activity --brief {user_flag} {q_pkg}").splitlines()
-        component = act[-1].strip() if act else ""
-        if "/" in component and not component.lower().startswith("no "):
-            exec_shell(f"am start {user_flag} -n {shlex.quote(component)}")
-        else:
-            exec_shell(f"monkey -p {q_pkg} -c android.intent.category.LAUNCHER 1")
-        print(f"{C_CYAN}  [⏳] Đang đồng bộ phiên đăng nhập Native cho {pkg} (5s)...{C_RESET}")
-        time.sleep(5.0)
+        # Lấy rbx-authentication-ticket để ép mọi client Roblox nhận phiên đăng nhập ngay khi mở
+        ticket = get_auth_ticket(cookie)
+        if ticket:
+            print(f"{C_CYAN}  [OK] Đã lấy Auth Ticket xác thực trực tiếp cho {display_name}{C_RESET}")
 
-    url_direct = f"roblox://placeId={game_id}"
-    rc = exec_shell(
-        f"am start {user_flag} -p {q_pkg} -a android.intent.action.VIEW -d {shlex.quote(url_direct)}"
-    )
+    if ticket:
+        launch_time = int(time.time() * 1000)
+        place_url = urllib.parse.quote(
+            f"https://assetgame.roblox.com/game/PlaceLauncher.ashx?request=RequestGame&placeId={game_id}&isPlayTogetherGame=false",
+            safe="",
+        )
+        uri_ticket = (
+            f"roblox-player:1+launchmode:play+gameinfo:{ticket}"
+            f"+launchtime:{launch_time}+placelauncherurl:{place_url}"
+            f"+browsertrackerid:{launch_time}+robloxLocale:en_us+gameLocale:en_us"
+        )
+        rc = exec_shell(
+            f"am start {user_flag} -p {q_pkg} -a android.intent.action.VIEW -d {shlex.quote(uri_ticket)}"
+        )
+        if rc != 0:
+            url_direct = f"roblox://placeId={game_id}"
+            rc = exec_shell(
+                f"am start {user_flag} -p {q_pkg} -a android.intent.action.VIEW -d {shlex.quote(url_direct)}"
+            )
+    else:
+        url_direct = f"roblox://placeId={game_id}"
+        rc = exec_shell(
+            f"am start {user_flag} -p {q_pkg} -a android.intent.action.VIEW -d {shlex.quote(url_direct)}"
+        )
+
     if rc != 0:
         print(f"{C_RED}{C_BOLD}  [ERROR] Failed to launch {pkg} with placeId={game_id}{C_RESET}")
         return False
@@ -781,7 +827,6 @@ def launch_and_join_single_tab(pkg, game_id, acc_info=None, is_rejoin=False, for
     return True
 
 def kill_and_rejoin_pkg(pkg, game_id, acc_info=None, reason="Mất kết nối", user_id=0):
-    """Kill đúng tab đang lỗi và rejoin lại tab đó vào Game ID ngay."""
     display_name = acc_info["name"] if acc_info else pkg
     print(f"\n{C_RED}{C_BOLD}  [🛑 KILL & REJOIN] {display_name} ({pkg}) -> Lý do: {reason}{C_RESET}")
     return launch_and_join_single_tab(pkg, game_id, acc_info, is_rejoin=True, force_inject=False, user_id=user_id)
@@ -947,7 +992,6 @@ while True:
                     print(f"\n{C_YELLOW}  [⏳] Đang quét tất cả user ảo / virtual space...{C_RESET}")
                     detected = scan_packages(all_users=True)
                 else:
-                    # D: tất cả package
                     raw = sorted([p.replace("package:", "").strip() for p in run_shell("pm list packages -3").splitlines() if p.strip()])
                     detected = [{"pkg": p, "user_id": 0} for p in raw]
 
