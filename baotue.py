@@ -214,21 +214,17 @@ def inject_cookie_to_pkg(pkg, cookie):
     )
     exec_shell(inject_cmd)
 
-def open_only_app(pkg, acc_info=None):
-    """Chỉ bật tab/app lên trước."""
+def launch_and_join_single_tab(pkg, game_id, acc_info=None, is_rejoin=False):
+    """Khởi động từng tab riêng lẻ và cho join thẳng vào Game ID đã set ngay lập tức."""
     display_name = acc_info["name"] if acc_info else "Chưa gắn Cookie"
-    print(f"{C_YELLOW}{C_BOLD}  [⬆] Đang bật tab: {pkg}{C_RESET} {C_DIM}({display_name}){C_RESET}")
+    action_text = "REJOIN & JOIN GAME" if is_rejoin else "KHỞI ĐỘNG & JOIN GAME"
+    print(f"\n{C_YELLOW}{C_BOLD}  [⏳] {action_text}: {pkg}{C_RESET}")
+    print(f"       {C_WHITE}• Tài khoản : {C_PURPLE}{display_name}{C_RESET}")
+    print(f"       {C_WHITE}• ID Game   : {C_GREEN}{game_id}{C_RESET}")
+
     exec_shell(f"am force-stop {pkg}")
     time.sleep(1.5)
-    if acc_info and acc_info.get("cookie"):
-        inject_cookie_to_pkg(pkg, acc_info["cookie"])
-    exec_shell(f"monkey -p {pkg} -c android.intent.category.LAUNCHER 1 || am start -p {pkg}")
-    print(f"{C_GREEN}  [✔] Tab {pkg} đã được bật lên!{C_RESET}")
 
-def join_game_for_pkg(pkg, game_id, acc_info=None):
-    """Gửi lệnh join vào game ID đã cấu hình cho tab."""
-    display_name = acc_info["name"] if acc_info else "Chưa gắn Cookie"
-    print(f"{C_CYAN}{C_BOLD}  [🎮] Đang join Game ID {game_id} cho tab: {pkg}{C_RESET} {C_PURPLE}({display_name}){C_RESET}")
     if acc_info and acc_info.get("cookie"):
         cookie = acc_info["cookie"]
         inject_cookie_to_pkg(pkg, cookie)
@@ -236,30 +232,21 @@ def join_game_for_pkg(pkg, game_id, acc_info=None):
         if ticket:
             url = f"roblox://placeId={game_id}&ticket={ticket}"
             exec_shell(f'am start -p {pkg} -a android.intent.action.VIEW -d "{url}"')
-            print(f"{C_GREEN}{C_BOLD}  [✔] Đã gửi vé Cookie & join Game {game_id} cho {pkg}!{C_RESET}")
+            print(f"{C_GREEN}{C_BOLD}  [✔] Đã khởi động tab {pkg} & join thẳng vào Game ID {game_id}!{C_RESET}")
             return
 
     url_direct = f"roblox://placeId={game_id}"
     exec_shell(f'am start -p {pkg} -a android.intent.action.VIEW -d "{url_direct}"')
-    print(f"{C_GREEN}{C_BOLD}  [✔] Đã gửi lệnh join Game ID {game_id} cho {pkg}!{C_RESET}")
+    print(f"{C_GREEN}{C_BOLD}  [✔] Đã khởi động tab {pkg} & join thẳng vào Game ID {game_id}!{C_RESET}")
 
 def kill_and_rejoin_pkg(pkg, game_id, acc_info=None, reason="Mất kết nối"):
-    """Kill đúng tab đang lỗi và rejoin lại tab đó."""
+    """Kill đúng tab đang lỗi và rejoin lại tab đó vào Game ID ngay."""
     display_name = acc_info["name"] if acc_info else pkg
     print(f"\n{C_RED}{C_BOLD}  [🛑 KILL & REJOIN] {display_name} ({pkg}) -> Lý do: {reason}{C_RESET}")
-    exec_shell(f"am force-stop {pkg}")
-    time.sleep(2)
-    open_only_app(pkg, acc_info)
-    time.sleep(3)
-    join_game_for_pkg(pkg, game_id, acc_info)
+    launch_and_join_single_tab(pkg, game_id, acc_info, is_rejoin=True)
 
 def launch_package_tab(pkg, game_id, acc_info=None, is_rejoin=False):
-    if is_rejoin:
-        kill_and_rejoin_pkg(pkg, game_id, acc_info, reason="Rejoin tab")
-    else:
-        open_only_app(pkg, acc_info)
-        time.sleep(2)
-        join_game_for_pkg(pkg, game_id, acc_info)
+    launch_and_join_single_tab(pkg, game_id, acc_info, is_rejoin=is_rejoin)
 
 def run_auto_rejoin(cfg):
     active_pkgs = [p["pkg"] for p in cfg.get("packages", []) if p.get("active", True)]
@@ -280,20 +267,13 @@ def run_auto_rejoin(cfg):
     print(f"  {C_YELLOW}{C_BOLD}• CHU KỲ KIỂM TRA    :{C_RESET} {C_WHITE}{C_BOLD}{cfg.get('delay', 20)} giây / lần{C_RESET}\n")
     print(f"{C_CYAN}──────────────────────────────────────────────────────────────────────────────{C_RESET}")
 
-    # BƯỚC 1: Khởi động toàn bộ các tab lên hết trước
-    print(f"\n{C_PURPLE}{C_BOLD}  [BƯỚC 1/2] ĐANG KHỞI ĐỘNG TOÀN BỘ {len(active_pkgs)} TAB LÊN TRƯỚC...{C_RESET}\n")
+    # Khởi động từng tab và cho join thẳng vào game ngay (không đợi mở hết các tab)
+    print(f"\n{C_PURPLE}{C_BOLD}  [⚡] KHỞI ĐỘNG TỪNG TAB & JOIN GAME NGAY (TRÁNH CRASH ĐỒNG LOẠT)...{C_RESET}")
     for pkg in active_pkgs:
-        open_only_app(pkg, acc_map.get(pkg))
-        time.sleep(3)
+        launch_and_join_single_tab(pkg, cfg["game_id"], acc_map.get(pkg), is_rejoin=False)
+        time.sleep(5)
 
-    print(f"\n{C_CYAN}──────────────────────────────────────────────────────────────────────────────{C_RESET}")
-    # BƯỚC 2: Sau khi các tab đã bật lên hết mới bắt đầu cho join vào game
-    print(f"\n{C_GREEN}{C_BOLD}  [BƯỚC 2/2] TẤT CẢ TAB ĐÃ BẬT! BẮT ĐẦU JOIN VÀO GAME ID {cfg['game_id']}...{C_RESET}\n")
-    for pkg in active_pkgs:
-        join_game_for_pkg(pkg, cfg["game_id"], acc_map.get(pkg))
-        time.sleep(4)
-
-    print(f"\n{C_GREEN}{C_BOLD}  [⚡] ĐÃ HOÀN TẤT KHỞI ĐỘNG & JOIN GAME! BẮT ĐẦU GIÁM SÁT (BAO GỒM ERROR 279)...{C_RESET}")
+    print(f"\n{C_GREEN}{C_BOLD}  [⚡] ĐÃ KHỞI ĐỘNG & GỬI JOIN TỪNG TAB! BẮT ĐẦU GIÁM SÁT (BAO GỒM ERROR 279)...{C_RESET}")
     print(f"{C_YELLOW}  (Nhấn tổ hợp phím Ctrl + C để dừng và quay về Menu chính){C_RESET}\n")
     
     try:
