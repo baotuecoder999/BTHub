@@ -94,22 +94,98 @@ def exec_shell(cmd, timeout=30):
         return 1
 
 # --- BẢNG MÀU & ĐỊNH DẠNG ANSI ---
-C_CYAN = "\033[96m"
-C_GREEN = "\033[92m"
+C_CYAN   = "\033[96m"
+C_GREEN  = "\033[92m"
 C_YELLOW = "\033[93m"
-C_RED = "\033[91m"
+C_RED    = "\033[91m"
 C_PURPLE = "\033[95m"
-C_WHITE = "\033[97m"
-C_BOLD = "\033[1m"
-C_DIM = "\033[2m"
-C_RESET = "\033[0m"
+C_WHITE  = "\033[97m"
+C_BOLD   = "\033[1m"
+C_DIM    = "\033[2m"
+C_RESET  = "\033[0m"
+
+# ============================================================
+# CLOUD PHONE SUPPORT — Danh sách nhận diện các Cloud Phone
+# ============================================================
+CLOUD_PHONE_PKGS = {
+    # VMOS
+    "com.vmos.pro":                     "VMOS Pro",
+    "com.vmos.classic":                 "VMOS Classic",
+    "com.vmos.app":                     "VMOS",
+    # Redfinger
+    "com.redfinger.android":            "Redfinger",
+    "com.redfinger.android.hd":         "Redfinger HD",
+    "com.redfinger.cloud":              "Redfinger Cloud",
+    # UGPhone
+    "com.ugphone.android":              "UGPhone",
+    "com.ugphone.cloud":                "UGPhone Cloud",
+    "com.ugphone.app":                  "UGPhone",
+    # 90Phone / CloudPhone
+    "com.nnodes.phone90":               "90Phone",
+    "com.nubia.cloudphone":             "CloudPhone",
+    "com.nt.cloudphone":                "CloudPhone",
+    # Parallel Space / Dual Space
+    "com.lbe.parallel.intl":            "Parallel Space",
+    "com.parallel.space.lite":          "Parallel Space Lite",
+    "com.excelliance.multiaccount":     "Dual Space",
+    "com.excelliance.dualaid":          "Dual Space Pro",
+    # Virtual Space / Clone
+    "com.phone.virtual":                "Virtual Phone",
+    "net.lostium.go":                   "Go Multi",
+    "com.meizu.flyme.multiplex":        "Multiplex",
+    "com.polestar.clone":               "Clone Phone",
+    "com.smartphone.phone90":           "Smart Phone 90",
+    # NoxPlayer / LDPlayer (trên thiết bị x86)
+    "com.android.nox":                  "NoxPlayer",
+    "com.bignox.app.store.hd":          "NoxPlayer Store",
+    "com.vphonegaga.titan":             "VPhoneGaga",
+    "com.genymotion.genyd":             "Genymotion",
+}
+
+CLOUD_PHONE_KEYWORDS = [
+    "vmos", "redfinger", "ugphone", "cloudphone", "90phone",
+    "parallel.space", "parallelspace", "dualspace", "dualaid",
+    "multiaccount", "multispace", "multiplex",
+    "virtualapp", "virtualxposed", "virtualphone",
+    "cloneapp", "clonephone", "twinapp", "doublespace",
+    "phonegaga", "genymotion", "noxplayer", "ldplayer",
+    "bluestacks", "memu", "leapdroid",
+    "polestar.clone", "smartphone.phone90",
+]
+
+def get_android_users():
+    """Lấy danh sách tất cả Android user (hỗ trợ virtual space / multi-user profile)."""
+    users = [0]
+    try:
+        out = run_shell("pm list users")
+        for line in out.splitlines():
+            m = re.search(r'UserInfo\{(\d+):', line)
+            if m:
+                uid = int(m.group(1))
+                if uid not in users:
+                    users.append(uid)
+    except Exception:
+        pass
+    return users
+
+def get_data_dir(pkg, user_id=0):
+    """Trả về đường dẫn data directory của package, hỗ trợ multi-user."""
+    if user_id == 0:
+        return f"/data/data/{pkg}"
+    return f"/data/user/{user_id}/{pkg}"
+
+# ============================================================
 
 def load_cfg():
     if os.path.exists(CFG_PATH):
         with open(CFG_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
             if data.get("packages") and isinstance(data["packages"][0], str):
-                data["packages"] = [{"pkg": p, "active": True} for p in data["packages"]]
+                data["packages"] = [{"pkg": p, "active": True, "user_id": 0} for p in data["packages"]]
+            # Migrate: thêm user_id nếu chưa có (tương thích config cũ)
+            for item in data.get("packages", []):
+                if "user_id" not in item:
+                    item["user_id"] = 0
             return data
     return {"game_id": "2753915549", "delay": 20, "packages": [], "accounts": []}
 
@@ -149,29 +225,54 @@ def get_system_stats():
 
     return f"{cpu_percent}%", f"{ram_percent}%"
 
-def scan_packages():
-    found = set()
-    q_out = run_shell('cmd package query-activities -a android.intent.action.VIEW -d "roblox://"')
-    for line in q_out.splitlines():
-        line = line.strip()
-        if line.startswith("packageName="):
-            pkg = line.split("=", 1)[1].strip()
-            if pkg:
-                found.add(pkg)
+def scan_packages(all_users=False):
+    """
+    Quét tất cả package liên quan đến Roblox, Cloud Phone và virtual environments.
+    Trả về list dict: [{"pkg": ..., "user_id": ...}, ...]
+    all_users=True: quét cả multi-user Android (virtual space như VMOS)
+    """
+    found = {}  # key="pkg@user_id" -> {"pkg": ..., "user_id": ...}
 
-    keywords = ["roblox", "delta", "arceus", "codex", "fluxus", "hydrogen", "vega", "trigon", "evon", "noka"]
-    all_pkgs = run_shell("pm list packages -3").splitlines()
-    for line in all_pkgs:
-        pkg = line.replace("package:", "").strip()
-        if any(k in pkg.lower() for k in keywords):
-            found.add(pkg)
+    roblox_keywords = [
+        "roblox", "delta", "arceus", "codex", "fluxus",
+        "hydrogen", "vega", "trigon", "evon", "noka",
+    ]
+    all_keywords = roblox_keywords + CLOUD_PHONE_KEYWORDS
 
-    return sorted(list(found))
+    users = get_android_users() if all_users else [0]
+
+    for user_id in users:
+        user_flag = f"--user {user_id}" if user_id != 0 else ""
+
+        # Quét qua intent VIEW với roblox://
+        q_out = run_shell(
+            f'cmd package query-activities {user_flag} -a android.intent.action.VIEW -d "roblox://"'
+        )
+        for line in q_out.splitlines():
+            line = line.strip()
+            if line.startswith("packageName="):
+                pkg = line.split("=", 1)[1].strip()
+                if pkg:
+                    key = f"{pkg}@{user_id}"
+                    found[key] = {"pkg": pkg, "user_id": user_id}
+
+        # Quét tất cả package user đã cài
+        all_pkgs = run_shell(f"pm list packages {user_flag} -3").splitlines()
+        for line in all_pkgs:
+            pkg = line.replace("package:", "").strip()
+            if not pkg:
+                continue
+            pkg_lower = pkg.lower()
+            if any(k in pkg_lower for k in all_keywords) or pkg in CLOUD_PHONE_PKGS:
+                key = f"{pkg}@{user_id}"
+                found[key] = {"pkg": pkg, "user_id": user_id}
+
+    return sorted(found.values(), key=lambda x: (x["user_id"], x["pkg"]))
 
 CHROME_EPOCH_OFFSET = 11644473600
-COOKIE_TTL_DAYS = 365
+COOKIE_TTL_DAYS     = 365
 ROBLOX_PREFS_USER_KEYS = ("userid_long", "username", "displayName", "under13")
-LAUNCH_GRACE_SECONDS = 45
+LAUNCH_GRACE_SECONDS   = 45
 ROBLOX_HTTP_UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36"
 
 def normalize_cookie(raw_cookie):
@@ -192,7 +293,6 @@ def verify_cookie(cookie):
         ck = normalize_cookie(cookie)
         if not ck:
             return None, None, None
-
         r = requests.get(
             "https://users.roblox.com/v1/users/authenticated",
             cookies={".ROBLOSECURITY": ck},
@@ -241,7 +341,6 @@ def get_auth_ticket(cookie):
         csrf = r1.headers.get("x-csrf-token")
         if csrf:
             headers["x-csrf-token"] = csrf
-
         r2 = s.post("https://auth.roblox.com/v1/authentication-ticket", headers=headers, timeout=10)
         return r2.headers.get("rbx-authentication-ticket")
     except Exception:
@@ -258,7 +357,6 @@ def has_error_279(pkg, pid=None):
         logs = run_shell("logcat -d -t 200")
         if not logs:
             return False
-
         pkg_low = pkg.lower()
         for line in logs.splitlines():
             low = line.lower()
@@ -274,8 +372,8 @@ def has_error_279(pkg, pid=None):
         pass
     return False
 
-def _get_pkg_owner(pkg):
-    data_dir = f"/data/data/{pkg}"
+def _get_pkg_owner(pkg, user_id=0):
+    data_dir = get_data_dir(pkg, user_id)
     owner = run_shell(f"stat -L -c '%u:%g' {shlex.quote(data_dir)}").strip()
     if owner and ":" in owner:
         return owner
@@ -383,26 +481,26 @@ def _upsert_roblosecurity_in_db(db_path, cookie):
         exp_us = now_us + COOKIE_TTL_DAYS * 86400 * 1_000_000
 
         defaults = {
-            "creation_utc": now_us,
-            "host_key": ".roblox.com",
+            "creation_utc":     now_us,
+            "host_key":         ".roblox.com",
             "top_frame_site_key": "",
-            "name": ".ROBLOSECURITY",
-            "value": cookie,
-            "encrypted_value": b"",
-            "path": "/",
-            "expires_utc": exp_us,
-            "is_secure": 1,
-            "is_httponly": 1,
-            "last_access_utc": now_us,
-            "has_expires": 1,
-            "is_persistent": 1,
-            "priority": 1,
-            "samesite": -1,
-            "source_scheme": 2,
-            "source_port": 443,
-            "is_same_party": 0,
-            "last_update_utc": now_us,
-            "source_type": 0,
+            "name":             ".ROBLOSECURITY",
+            "value":            cookie,
+            "encrypted_value":  b"",
+            "path":             "/",
+            "expires_utc":      exp_us,
+            "is_secure":        1,
+            "is_httponly":      1,
+            "last_access_utc":  now_us,
+            "has_expires":      1,
+            "is_persistent":    1,
+            "priority":         1,
+            "samesite":         -1,
+            "source_scheme":    2,
+            "source_port":      443,
+            "is_same_party":    0,
+            "last_update_utc":  now_us,
+            "source_type":      0,
             "has_cross_site_ancestor": 0,
         }
 
@@ -458,8 +556,8 @@ def _pull_file_as_root(src_path, dst_path):
     exec_shell(cmd)
     return os.path.isfile(dst_path)
 
-def _pull_cookies_bundle(pkg, tmp_dir):
-    base = f"/data/data/{pkg}/app_webview/Default"
+def _pull_cookies_bundle(pkg, tmp_dir, user_id=0):
+    base = f"{get_data_dir(pkg, user_id)}/app_webview/Default"
     tmp_db = os.path.join(tmp_dir, "Cookies")
     for suffix in ("", "-journal", "-wal", "-shm"):
         p = os.path.join(tmp_dir, "Cookies" + suffix)
@@ -468,15 +566,16 @@ def _pull_cookies_bundle(pkg, tmp_dir):
         _pull_file_as_root(f"{base}/Cookies{suffix}", p)
     return tmp_db
 
-def _bootstrap_webview_cookies(pkg, cookies_path):
+def _bootstrap_webview_cookies(pkg, cookies_path, user_id=0):
     q_pkg = shlex.quote(pkg)
-    q_ck = shlex.quote(cookies_path)
+    q_ck  = shlex.quote(cookies_path)
+    user_flag = f"--user {user_id}" if user_id != 0 else ""
     exec_shell(f"rm -f {q_ck} {q_ck}-journal {q_ck}-wal {q_ck}-shm")
 
-    act = run_shell(f"cmd package resolve-activity --brief {q_pkg}").splitlines()
+    act = run_shell(f"cmd package resolve-activity --brief {user_flag} {q_pkg}").splitlines()
     component = act[-1].strip() if act else ""
     if "/" in component and not component.lower().startswith("no "):
-        exec_shell(f"am start -n {shlex.quote(component)}")
+        exec_shell(f"am start {user_flag} -n {shlex.quote(component)}")
     else:
         exec_shell(f"monkey -p {q_pkg} -c android.intent.category.LAUNCHER 1")
 
@@ -486,14 +585,14 @@ def _bootstrap_webview_cookies(pkg, cookies_path):
         if sz.isdigit() and int(sz) >= 4096:
             break
 
-    exec_shell(f"am force-stop {q_pkg}")
+    exec_shell(f"am force-stop {user_flag} {q_pkg}")
     time.sleep(1.0)
 
-def _clean_stale_session_files(pkg, owner, tmp_dir):
-    base = f"/data/data/{pkg}"
-    q_def = shlex.quote(f"{base}/app_webview/Default")
+def _clean_stale_session_files(pkg, owner, tmp_dir, user_id=0):
+    base          = get_data_dir(pkg, user_id)
+    q_def         = shlex.quote(f"{base}/app_webview/Default")
     q_app_storage = shlex.quote(f"{base}/files/appData/LocalStorage/appStorage.json")
-    q_db_dir = shlex.quote(f"{base}/databases")
+    q_db_dir      = shlex.quote(f"{base}/databases")
 
     exec_shell(
         f"rm -f {q_def}/Cookies-journal {q_def}/Cookies-wal {q_def}/Cookies-shm "
@@ -501,7 +600,7 @@ def _clean_stale_session_files(pkg, owner, tmp_dir):
     )
 
     prefs_path = f"{base}/shared_prefs/prefs.xml"
-    tmp_prefs = os.path.join(tmp_dir, "prefs.xml")
+    tmp_prefs  = os.path.join(tmp_dir, "prefs.xml")
     if _pull_file_as_root(prefs_path, tmp_prefs):
         try:
             with open(tmp_prefs, "r", encoding="utf-8", errors="ignore") as f:
@@ -510,9 +609,9 @@ def _clean_stale_session_files(pkg, owner, tmp_dir):
             if cleaned_xml != orig_xml:
                 with open(tmp_prefs, "w", encoding="utf-8") as f:
                     f.write(cleaned_xml)
-                q_tmp = shlex.quote(tmp_prefs)
+                q_tmp   = shlex.quote(tmp_prefs)
                 q_prefs = shlex.quote(prefs_path)
-                q_own = shlex.quote(owner)
+                q_own   = shlex.quote(owner)
                 exec_shell(
                     f"cat {q_tmp} > {q_prefs} && chown {q_own} {q_prefs} && "
                     f"chmod 660 {q_prefs} && (restorecon {q_prefs} 2>/dev/null || true)"
@@ -520,7 +619,7 @@ def _clean_stale_session_files(pkg, owner, tmp_dir):
         except Exception:
             pass
 
-def is_session_synced(pkg, expected_uid, expected_cookie):
+def is_session_synced(pkg, expected_uid, expected_cookie, user_id=0):
     if not HAS_ROOT or not pkg or not expected_cookie:
         return False
     ck = normalize_cookie(expected_cookie)
@@ -528,7 +627,7 @@ def is_session_synced(pkg, expected_uid, expected_cookie):
         return False
 
     if expected_uid:
-        prefs_path = f"/data/data/{pkg}/shared_prefs/prefs.xml"
+        prefs_path = f"{get_data_dir(pkg, user_id)}/shared_prefs/prefs.xml"
         uid_line = run_shell(
             f"grep -F 'name=\"userid_long\"' {shlex.quote(prefs_path)}"
         )
@@ -537,49 +636,53 @@ def is_session_synced(pkg, expected_uid, expected_cookie):
 
     tmp_dir = tempfile.mkdtemp(prefix="rblx_chk_")
     try:
-        tmp_db = _pull_cookies_bundle(pkg, tmp_dir)
-        stored_ck = _read_roblosecurity_from_db(tmp_db)
+        tmp_db     = _pull_cookies_bundle(pkg, tmp_dir, user_id)
+        stored_ck  = _read_roblosecurity_from_db(tmp_db)
         return stored_ck == ck
     except Exception:
         return False
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-def inject_cookie_to_pkg(pkg, cookie):
+def inject_cookie_to_pkg(pkg, cookie, user_id=0):
     if not HAS_ROOT:
         return False, "Root (su) access is required to inject cookies"
     ck = normalize_cookie(cookie)
     if not pkg or not ck:
         return False, "Invalid package or empty cookie"
 
-    q_pkg = shlex.quote(pkg)
+    q_pkg     = shlex.quote(pkg)
+    user_flag = f"--user {user_id}" if user_id != 0 else ""
+
     if run_shell(f"pidof {q_pkg}").strip():
-        exec_shell(f"am force-stop {q_pkg}")
+        exec_shell(f"am force-stop {user_flag} {q_pkg}")
         time.sleep(1.0)
 
-    owner = _get_pkg_owner(pkg)
+    owner = _get_pkg_owner(pkg, user_id)
     if not owner:
-        return False, f"Package data directory not found: /data/data/{pkg}"
+        data_dir = get_data_dir(pkg, user_id)
+        return False, f"Package data directory not found: {data_dir}"
 
-    webview_dir = f"/data/data/{pkg}/app_webview"
-    default_dir = f"{webview_dir}/Default"
+    data_dir     = get_data_dir(pkg, user_id)
+    webview_dir  = f"{data_dir}/app_webview"
+    default_dir  = f"{webview_dir}/Default"
     cookies_path = f"{default_dir}/Cookies"
 
     tmp_dir = tempfile.mkdtemp(prefix="rblx_ck_")
     try:
-        tmp_db = _pull_cookies_bundle(pkg, tmp_dir)
+        tmp_db = _pull_cookies_bundle(pkg, tmp_dir, user_id)
         if not _has_cookies_table(tmp_db):
-            _bootstrap_webview_cookies(pkg, cookies_path)
-            tmp_db = _pull_cookies_bundle(pkg, tmp_dir)
+            _bootstrap_webview_cookies(pkg, cookies_path, user_id)
+            tmp_db = _pull_cookies_bundle(pkg, tmp_dir, user_id)
         if not _has_cookies_table(tmp_db):
             _create_fallback_cookies_db(tmp_db)
 
         _upsert_roblosecurity_in_db(tmp_db, ck)
         expected_size = os.path.getsize(tmp_db)
 
-        _clean_stale_session_files(pkg, owner, tmp_dir)
+        _clean_stale_session_files(pkg, owner, tmp_dir, user_id)
 
-        q_wv = shlex.quote(webview_dir)
+        q_wv  = shlex.quote(webview_dir)
         q_def = shlex.quote(default_dir)
         q_dst = shlex.quote(cookies_path)
         q_tmp = shlex.quote(tmp_db)
@@ -607,23 +710,30 @@ def inject_cookie_to_pkg(pkg, cookie):
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-def launch_and_join_single_tab(pkg, game_id, acc_info=None, is_rejoin=False, force_inject=False):
-    """Khởi động từng tab riêng lẻ và cho join thẳng vào Game ID đã set ngay lập tức."""
+def launch_and_join_single_tab(pkg, game_id, acc_info=None, is_rejoin=False, force_inject=False, user_id=0):
+    """Khởi động từng tab riêng lẻ và join thẳng vào Game ID đã set."""
     display_name = acc_info["name"] if acc_info else "Chưa gắn Cookie"
-    action_text = "REJOIN & JOIN GAME" if is_rejoin else "KHỞI ĐỘNG & JOIN GAME"
-    print(f"\n{C_YELLOW}{C_BOLD}  [⏳] {action_text}: {pkg}{C_RESET}")
+    action_text  = "REJOIN & JOIN GAME" if is_rejoin else "KHỞI ĐỘNG & JOIN GAME"
+    cloud_name   = CLOUD_PHONE_PKGS.get(pkg, "")
+    cloud_label  = f" [{cloud_name}]" if cloud_name else ""
+
+    print(f"\n{C_YELLOW}{C_BOLD}  [⏳] {action_text}: {pkg}{cloud_label}{C_RESET}")
     print(f"       {C_WHITE}• Tài khoản : {C_PURPLE}{display_name}{C_RESET}")
     print(f"       {C_WHITE}• ID Game   : {C_GREEN}{game_id}{C_RESET}")
+    if user_id != 0:
+        print(f"       {C_WHITE}• User ID   : {C_CYAN}{user_id} (Virtual Space / Multi-User){C_RESET}")
 
-    q_pkg = shlex.quote(pkg)
-    exec_shell(f"am force-stop {q_pkg}")
+    q_pkg     = shlex.quote(pkg)
+    user_flag = f"--user {user_id}" if user_id != 0 else ""
+
+    exec_shell(f"am force-stop {user_flag} {q_pkg}")
     time.sleep(1.2)
 
     if acc_info and acc_info.get("cookie"):
-        cookie = normalize_cookie(acc_info["cookie"])
-        need_inject = force_inject or not is_session_synced(pkg, acc_info.get("uid"), cookie)
+        cookie     = normalize_cookie(acc_info["cookie"])
+        need_inject = force_inject or not is_session_synced(pkg, acc_info.get("uid"), cookie, user_id)
         if need_inject:
-            ok, err = inject_cookie_to_pkg(pkg, cookie)
+            ok, err = inject_cookie_to_pkg(pkg, cookie, user_id)
             if not ok:
                 print(f"{C_RED}{C_BOLD}  [ERROR] Cookie inject failed for {pkg}: {err}{C_RESET}")
                 return False
@@ -632,7 +742,9 @@ def launch_and_join_single_tab(pkg, game_id, acc_info=None, is_rejoin=False, for
             print(f"{C_DIM}  [OK] Existing session already synced for {pkg}{C_RESET}")
 
     url_direct = f"roblox://placeId={game_id}"
-    rc = exec_shell(f"am start -p {q_pkg} -a android.intent.action.VIEW -d {shlex.quote(url_direct)}")
+    rc = exec_shell(
+        f"am start {user_flag} -p {q_pkg} -a android.intent.action.VIEW -d {shlex.quote(url_direct)}"
+    )
     if rc != 0:
         print(f"{C_RED}{C_BOLD}  [ERROR] Failed to launch {pkg} with placeId={game_id}{C_RESET}")
         return False
@@ -640,40 +752,41 @@ def launch_and_join_single_tab(pkg, game_id, acc_info=None, is_rejoin=False, for
     print(f"{C_GREEN}{C_BOLD}  [✔] Đã khởi động tab {pkg} & join thẳng vào Game ID {game_id}!{C_RESET}")
     return True
 
-def kill_and_rejoin_pkg(pkg, game_id, acc_info=None, reason="Mất kết nối"):
+def kill_and_rejoin_pkg(pkg, game_id, acc_info=None, reason="Mất kết nối", user_id=0):
     """Kill đúng tab đang lỗi và rejoin lại tab đó vào Game ID ngay."""
     display_name = acc_info["name"] if acc_info else pkg
     print(f"\n{C_RED}{C_BOLD}  [🛑 KILL & REJOIN] {display_name} ({pkg}) -> Lý do: {reason}{C_RESET}")
-    return launch_and_join_single_tab(pkg, game_id, acc_info, is_rejoin=True, force_inject=False)
+    return launch_and_join_single_tab(pkg, game_id, acc_info, is_rejoin=True, force_inject=False, user_id=user_id)
 
-def launch_package_tab(pkg, game_id, acc_info=None, is_rejoin=False, force_inject=False):
-    return launch_and_join_single_tab(pkg, game_id, acc_info, is_rejoin=is_rejoin, force_inject=force_inject)
+def launch_package_tab(pkg, game_id, acc_info=None, is_rejoin=False, force_inject=False, user_id=0):
+    return launch_and_join_single_tab(pkg, game_id, acc_info, is_rejoin=is_rejoin, force_inject=force_inject, user_id=user_id)
 
 def run_auto_rejoin(cfg):
-    active_pkgs = [p["pkg"] for p in cfg.get("packages", []) if p.get("active", True)]
-    if not active_pkgs:
+    active_items = [p for p in cfg.get("packages", []) if p.get("active", True)]
+    if not active_items:
         print(f"\n{C_RED}{C_BOLD}  [!] BẠN CHƯA CHỌN PACKAGE NÀO ĐỂ CHẠY!{C_RESET}")
         print(f"{C_YELLOW}  ➔ Hãy vào mục [2] để BẬT các Package cần chạy trên CloudPhone.{C_RESET}")
         time.sleep(3)
         return
 
-    acc_map = {a["pkg"]: a for a in cfg.get("accounts", [])}
+    acc_map    = {a["pkg"]: a for a in cfg.get("accounts", [])}
     last_launch = {}
-    grace_sec = max(LAUNCH_GRACE_SECONDS, cfg.get("delay", 20))
+    grace_sec  = max(LAUNCH_GRACE_SECONDS, cfg.get("delay", 20))
 
     os.system("clear")
     print(f"{C_CYAN}{C_BOLD}╔════════════════════════════════════════════════════════════════════════════╗{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║                 🚀 HỆ THỐNG AUTO-REJOIN ĐANG HOẠT ĐỘNG 🚀                  ║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}╚════════════════════════════════════════════════════════════════════════════╝{C_RESET}\n")
     print(f"  {C_YELLOW}{C_BOLD}• ID GAME MỤC TIÊU   :{C_RESET} {C_GREEN}{C_BOLD}{cfg['game_id']}{C_RESET}")
-    print(f"  {C_YELLOW}{C_BOLD}• SỐ PACKAGE ĐÃ CHỌN :{C_RESET} {C_WHITE}{C_BOLD}{len(active_pkgs)} tab đang kích hoạt{C_RESET}")
+    print(f"  {C_YELLOW}{C_BOLD}• SỐ PACKAGE ĐÃ CHỌN :{C_RESET} {C_WHITE}{C_BOLD}{len(active_items)} tab đang kích hoạt{C_RESET}")
     print(f"  {C_YELLOW}{C_BOLD}• CHU KỲ KIỂM TRA    :{C_RESET} {C_WHITE}{C_BOLD}{cfg.get('delay', 20)} giây / lần{C_RESET}\n")
     print(f"{C_CYAN}──────────────────────────────────────────────────────────────────────────────{C_RESET}")
 
-    # Khởi động từng tab và cho join thẳng vào game ngay (không đợi mở hết các tab)
     print(f"\n{C_PURPLE}{C_BOLD}  [⚡] KHỞI ĐỘNG TỪNG TAB & JOIN GAME NGAY (TRÁNH CRASH ĐỒNG LOẠT)...{C_RESET}")
-    for pkg in active_pkgs:
-        launch_and_join_single_tab(pkg, cfg["game_id"], acc_map.get(pkg), is_rejoin=False)
+    for item in active_items:
+        pkg     = item["pkg"]
+        uid_app = item.get("user_id", 0)
+        launch_and_join_single_tab(pkg, cfg["game_id"], acc_map.get(pkg), is_rejoin=False, user_id=uid_app)
         last_launch[pkg] = time.time()
         time.sleep(5)
 
@@ -684,17 +797,19 @@ def run_auto_rejoin(cfg):
         while True:
             print(f"{C_DIM}──────────────────────────────────────────────────────────────────────────────{C_RESET}")
             print(f"{C_CYAN}{C_BOLD}  [⏰ KIỂM TRA LÚC: {time.strftime('%H:%M:%S')}]{C_RESET}\n")
-            for pkg in active_pkgs:
-                acc = acc_map.get(pkg)
-                pid = run_shell(f"pidof {shlex.quote(pkg)}").strip()
-                err279 = has_error_279(pkg, pid)
+            for item in active_items:
+                pkg     = item["pkg"]
+                uid_app = item.get("user_id", 0)
+                acc     = acc_map.get(pkg)
+                pid     = run_shell(f"pidof {shlex.quote(pkg)}").strip()
+                err279  = has_error_279(pkg, pid)
                 elapsed = time.time() - last_launch.get(pkg, 0)
                 in_grace = elapsed < grace_sec
 
                 if acc and acc.get("uid"):
                     if err279 or (not pid and elapsed >= 8):
                         reason = "Phát hiện lỗi Error 279 (Mất kết nối)" if err279 else "Tiến trình App đã tắt"
-                        kill_and_rejoin_pkg(pkg, cfg["game_id"], acc, reason=reason)
+                        kill_and_rejoin_pkg(pkg, cfg["game_id"], acc, reason=reason, user_id=uid_app)
                         last_launch[pkg] = time.time()
                         time.sleep(6)
                         continue
@@ -708,13 +823,13 @@ def run_auto_rejoin(cfg):
                     elif ingame is None:
                         print(f"{C_YELLOW}  [WARN] {acc['name']:<18} | {pkg} -> Presence API unavailable, keeping running tab{C_RESET}")
                     else:
-                        kill_and_rejoin_pkg(pkg, cfg["game_id"], acc, reason="Bị văng khỏi phòng / Mất kết nối")
+                        kill_and_rejoin_pkg(pkg, cfg["game_id"], acc, reason="Bị văng khỏi phòng / Mất kết nối", user_id=uid_app)
                         last_launch[pkg] = time.time()
                         time.sleep(6)
                 else:
                     if err279 or (not pid and elapsed >= 8):
                         reason = "Phát hiện lỗi Error 279" if err279 else "Tiến trình App đã tắt"
-                        kill_and_rejoin_pkg(pkg, cfg["game_id"], None, reason=reason)
+                        kill_and_rejoin_pkg(pkg, cfg["game_id"], None, reason=reason, user_id=uid_app)
                         last_launch[pkg] = time.time()
                         time.sleep(6)
                     else:
@@ -725,17 +840,20 @@ def run_auto_rejoin(cfg):
         print(f"\n{C_YELLOW}{C_BOLD}  [!] Đã dừng chế độ Auto-Rejoin.{C_RESET}")
         time.sleep(1.5)
 
+# ============================================================
+# MAIN MENU LOOP
+# ============================================================
 while True:
     os.system("clear")
-    cfg = load_cfg()
-    pkgs_list = cfg.get("packages", [])
+    cfg        = load_cfg()
+    pkgs_list  = cfg.get("packages", [])
     active_count = sum(1 for p in pkgs_list if p.get("active", True))
     cpu_usage, ram_usage = get_system_stats()
     mode_label = "ROOT (su)" if HAS_ROOT else "NON-ROOT"
-    
+
     print(f"{C_CYAN}{C_BOLD}╔════════════════════════════════════════════════════════════════════════════╗{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║                                                                            ║{C_RESET}")
-    print(f"{C_CYAN}{C_BOLD}║               TUE GAY               ║{C_RESET}")
+    print(f"{C_CYAN}{C_BOLD}║                           TUE GAY                                         ║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║                                                                            ║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}╠════════════════════════════════════════════════════════════════════════════╣{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║                                                                            ║{C_RESET}")
@@ -745,7 +863,7 @@ while True:
     print(f"{C_CYAN}{C_BOLD}║{C_RESET}   {C_YELLOW}{C_BOLD}• TÀI KHOẢN COOKIE     :{C_RESET}  {C_WHITE}{C_BOLD}{str(len(cfg['accounts'])) + ' tài khoản đã liên kết':<47}{C_RESET}{C_CYAN}{C_BOLD}║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║                                                                            ║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}╚════════════════════════════════════════════════════════════════════════════╝{C_RESET}")
-    
+
     print(f"\n{C_CYAN}{C_BOLD}   ══════════════════════════[ BẢNG ĐIỀU KHIỂN CHÍNH ]══════════════════════════{C_RESET}\n")
     print(f"      {C_GREEN}{C_BOLD}[1]{C_RESET}   🚀   {C_WHITE}{C_BOLD}KHỞI ĐỘNG TẤT CẢ TAB ĐÃ SET & CHẠY AUTO-REJOIN{C_RESET}\n")
     print(f"      {C_GREEN}{C_BOLD}[2]{C_RESET}   📦   {C_WHITE}{C_BOLD}SET PACKAGE & CHỌN PACKAGE CHẠY TRÊN CLOUDPHONE{C_RESET}\n")
@@ -756,74 +874,96 @@ while True:
     print(f"      {C_GREEN}{C_BOLD}[7]{C_RESET}   🗑️    {C_WHITE}{C_BOLD}XÓA TÀI KHOẢN HOẶC PACKAGE KHỎI DANH SÁCH{C_RESET}\n")
     print(f"      {C_RED}{C_BOLD}[0]{C_RESET}   🚪   {C_RED}{C_BOLD}THOÁT CHƯƠNG TRÌNH{C_RESET}\n")
     print(f"{C_CYAN}{C_BOLD}   ════════════════════════════════════════════════════════════════════════════{C_RESET}")
-    
+
     choice = input(f"\n{C_YELLOW}{C_BOLD}   ➜ NHẬP LỰA CHỌN CỦA BẠN [0-7]: {C_RESET}").strip()
 
     if choice == "1":
         run_auto_rejoin(cfg)
-        
+
     elif choice == "2":
         while True:
             os.system("clear")
-            cfg = load_cfg()
+            cfg       = load_cfg()
             saved_pkgs = cfg.get("packages", [])
-            acc_map = {a["pkg"]: a["name"] for a in cfg.get("accounts", [])}
-            
+            acc_map   = {a["pkg"]: a["name"] for a in cfg.get("accounts", [])}
+
             print(f"{C_CYAN}{C_BOLD}╔════════════════════════════════════════════════════════════════════════════╗{C_RESET}")
             print(f"{C_CYAN}{C_BOLD}║              QUẢN LÝ & CHỌN PACKAGE CHẠY TRÊN CLOUDPHONE                   ║{C_RESET}")
             print(f"{C_CYAN}{C_BOLD}╚════════════════════════════════════════════════════════════════════════════╝{C_RESET}\n")
-            
+
             print(f"{C_PURPLE}{C_BOLD}  [DANH SÁCH PACKAGE ĐÃ LƯU - BẬT/TẮT ĐỂ CHẠY]:{C_RESET}\n")
             if saved_pkgs:
                 for i, item in enumerate(saved_pkgs):
-                    status_tag = f"{C_GREEN}{C_BOLD}[✔ BẬT CHẠY]{C_RESET}" if item.get("active", True) else f"{C_RED}{C_BOLD}[✖ TẮT]     {C_RESET}"
-                    linked_acc = f"{C_CYAN}(Nick: {acc_map[item['pkg']]}){C_RESET}" if item['pkg'] in acc_map else f"{C_DIM}(Chưa gắn Cookie){C_RESET}"
-                    print(f"     {C_YELLOW}{C_BOLD}[{i+1}]{C_RESET}  {status_tag}  {C_WHITE}{C_BOLD}{item['pkg']:<28}{C_RESET} {linked_acc}\n")
+                    status_tag  = f"{C_GREEN}{C_BOLD}[✔ BẬT CHẠY]{C_RESET}" if item.get("active", True) else f"{C_RED}{C_BOLD}[✖ TẮT]     {C_RESET}"
+                    linked_acc  = f"{C_CYAN}(Nick: {acc_map[item['pkg']]}){C_RESET}" if item['pkg'] in acc_map else f"{C_DIM}(Chưa gắn Cookie){C_RESET}"
+                    uid_label   = f" {C_YELLOW}[User:{item.get('user_id',0)}]{C_RESET}" if item.get("user_id", 0) != 0 else ""
+                    cloud_label = f" {C_PURPLE}[{CLOUD_PHONE_PKGS[item['pkg']]}]{C_RESET}" if item['pkg'] in CLOUD_PHONE_PKGS else ""
+                    print(f"     {C_YELLOW}{C_BOLD}[{i+1}]{C_RESET}  {status_tag}  {C_WHITE}{C_BOLD}{item['pkg']:<28}{C_RESET}{cloud_label}{uid_label} {linked_acc}\n")
             else:
                 print(f"     {C_RED}(Chưa có package nào - Hãy bấm phím A để quét){C_RESET}\n")
 
             print(f"{C_CYAN}──────────────────────────────────────────────────────────────────────────────{C_RESET}\n")
-            print(f"     {C_GREEN}{C_BOLD}[A]{C_RESET}  Quét tất cả Client (Delta, Arceus, Noka, Clone...) trên máy\n")
+            print(f"     {C_GREEN}{C_BOLD}[A]{C_RESET}  Quét Client Roblox + Cloud Phone (VMOS/Redfinger/UGPhone/...)\n")
+            print(f"     {C_GREEN}{C_BOLD}[M]{C_RESET}  Quét toàn bộ user ảo / Multi-User Android (Virtual Space)\n")
             print(f"     {C_GREEN}{C_BOLD}[D]{C_RESET}  Hiển thị TOÀN BỘ ứng dụng trên máy\n")
             print(f"     {C_GREEN}{C_BOLD}[B]{C_RESET}  Bật TẤT CẢ Package      |      {C_RED}{C_BOLD}[C]{C_RESET}  Tắt TẤT CẢ Package\n")
             print(f"     {C_YELLOW}{C_BOLD}[Số STT]{C_RESET}  Nhập số (vd: 1 hoặc 1,2) để Bật/Tắt nhanh      |      {C_RED}{C_BOLD}[0]{C_RESET}  Quay lại\n")
-            
+
             sub = input(f"\n{C_CYAN}{C_BOLD}  ➜ NHẬP LỰA CHỌN CỦA BẠN: {C_RESET}").strip()
             if sub == "0":
                 break
-            elif sub.upper() in ["A", "D"]:
-                detected = scan_packages() if sub.upper() == "A" else sorted([p.replace("package:", "").strip() for p in run_shell("pm list packages -3").splitlines() if p.strip()])
-                
+            elif sub.upper() in ["A", "M", "D"]:
+                if sub.upper() == "A":
+                    detected = scan_packages(all_users=False)
+                elif sub.upper() == "M":
+                    print(f"\n{C_YELLOW}  [⏳] Đang quét tất cả user ảo / virtual space...{C_RESET}")
+                    detected = scan_packages(all_users=True)
+                else:
+                    # D: tất cả package
+                    raw = sorted([p.replace("package:", "").strip() for p in run_shell("pm list packages -3").splitlines() if p.strip()])
+                    detected = [{"pkg": p, "user_id": 0} for p in raw]
+
                 print(f"\n{C_GREEN}{C_BOLD}  [+] TÌM THẤY {len(detected)} GÓI ỨNG DỤNG:{C_RESET}\n")
-                for idx, p in enumerate(detected):
-                    print(f"      {C_YELLOW}{C_BOLD}[{idx+1}]{C_RESET}  {C_WHITE}{C_BOLD}{p}{C_RESET}")
+                for idx, d in enumerate(detected):
+                    cloud_label = f" {C_PURPLE}[{CLOUD_PHONE_PKGS.get(d['pkg'], '')}]{C_RESET}" if d['pkg'] in CLOUD_PHONE_PKGS else ""
+                    uid_label   = f" {C_YELLOW}(User:{d['user_id']}){C_RESET}" if d["user_id"] != 0 else ""
+                    print(f"      {C_YELLOW}{C_BOLD}[{idx+1}]{C_RESET}  {C_WHITE}{C_BOLD}{d['pkg']}{C_RESET}{cloud_label}{uid_label}")
+
                 inp = input(f"\n{C_CYAN}{C_BOLD}  ➔ Nhập STT muốn thêm (vd: 1,2,3 hoặc 'all'): {C_RESET}").strip()
-                existing_names = [x["pkg"] for x in saved_pkgs]
-                
+                existing_keys = {f"{x['pkg']}@{x.get('user_id',0)}" for x in saved_pkgs}
+
                 if inp.lower() == "all":
-                    for p in detected:
-                        if p not in existing_names:
-                            saved_pkgs.append({"pkg": p, "active": True})
+                    for d in detected:
+                        key = f"{d['pkg']}@{d['user_id']}"
+                        if key not in existing_keys:
+                            saved_pkgs.append({"pkg": d["pkg"], "active": True, "user_id": d["user_id"]})
+                            existing_keys.add(key)
                 else:
                     parts = [x.strip() for x in inp.split(",") if x.strip()]
                     for part in parts:
                         if part.isdigit() and 1 <= int(part) <= len(detected):
-                            p_name = detected[int(part)-1]
-                            if p_name not in existing_names:
-                                saved_pkgs.append({"pkg": p_name, "active": True})
-                                existing_names.append(p_name)
-                        elif part and part not in existing_names:
-                            saved_pkgs.append({"pkg": part, "active": True})
-                            existing_names.append(part)
+                            d   = detected[int(part) - 1]
+                            key = f"{d['pkg']}@{d['user_id']}"
+                            if key not in existing_keys:
+                                saved_pkgs.append({"pkg": d["pkg"], "active": True, "user_id": d["user_id"]})
+                                existing_keys.add(key)
+                        elif part:
+                            key = f"{part}@0"
+                            if key not in existing_keys:
+                                saved_pkgs.append({"pkg": part, "active": True, "user_id": 0})
+                                existing_keys.add(key)
+
                 cfg["packages"] = saved_pkgs
                 save_cfg(cfg)
                 print(f"\n{C_GREEN}{C_BOLD}  [✔] ĐÃ CẬP NHẬT DANH SÁCH PACKAGE!{C_RESET}")
                 time.sleep(1.2)
             elif sub.upper() == "B":
-                for item in saved_pkgs: item["active"] = True
+                for item in saved_pkgs:
+                    item["active"] = True
                 save_cfg(cfg)
             elif sub.upper() == "C":
-                for item in saved_pkgs: item["active"] = False
+                for item in saved_pkgs:
+                    item["active"] = False
                 save_cfg(cfg)
             else:
                 parts = [x.strip() for x in sub.split(",") if x.strip().isdigit()]
@@ -833,7 +973,7 @@ while True:
                         saved_pkgs[idx]["active"] = not saved_pkgs[idx].get("active", True)
                 cfg["packages"] = saved_pkgs
                 save_cfg(cfg)
-        
+
     elif choice == "3":
         os.system("clear")
         print(f"{C_CYAN}{C_BOLD}╔════════════════════════════════════════════════════════════════════════════╗{C_RESET}")
@@ -846,19 +986,20 @@ while True:
             print(f"{C_RED}{C_BOLD}  [!] Bạn chưa thêm Package nào! Vui lòng vào mục [2] trước.{C_RESET}")
             input(f"\n{C_DIM}  Bấm Enter để quay lại...{C_RESET}")
             continue
-            
+
         print(f"{C_GREEN}{C_BOLD}  DANH SÁCH PACKAGE HIỆN CÓ TRÊN MÁY:{C_RESET}\n")
         for i, item in enumerate(saved_pkgs):
-            acc_match = next((a["name"] for a in cfg["accounts"] if a["pkg"] == item["pkg"]), "Chưa gắn nick")
-            print(f"     {C_YELLOW}{C_BOLD}[{i+1}]{C_RESET}  {C_WHITE}{C_BOLD}{item['pkg']:<30}{C_RESET} {C_PURPLE}(Hiện tại: {acc_match}){C_RESET}\n")
-            
+            acc_match   = next((a["name"] for a in cfg["accounts"] if a["pkg"] == item["pkg"]), "Chưa gắn nick")
+            cloud_label = f" {C_PURPLE}[{CLOUD_PHONE_PKGS.get(item['pkg'], '')}]{C_RESET}" if item['pkg'] in CLOUD_PHONE_PKGS else ""
+            uid_label   = f" {C_YELLOW}(User:{item.get('user_id',0)}){C_RESET}" if item.get("user_id", 0) != 0 else ""
+            print(f"     {C_YELLOW}{C_BOLD}[{i+1}]{C_RESET}  {C_WHITE}{C_BOLD}{item['pkg']:<30}{C_RESET}{cloud_label}{uid_label} {C_PURPLE}(Hiện tại: {acc_match}){C_RESET}\n")
+
         print(f"{C_CYAN}──────────────────────────────────────────────────────────────────────────────{C_RESET}")
         print(f"  {C_YELLOW}HƯỚNG DẪN NHẬP & LOGIN TỰ ĐỘNG:{C_RESET}")
         print(f"  - Dán danh sách nhiều Cookie (mỗi dòng 1 cookie).")
         print(f"  - Tool sẽ tự động gán vào Package và khởi động app để login ngay.\n")
-        
         print(f"{C_CYAN}{C_BOLD}  ➔ Dán danh sách Cookie (Gõ 'END' ở dòng cuối để kết thúc):{C_RESET}")
-        
+
         lines = []
         while True:
             try:
@@ -872,7 +1013,7 @@ while True:
                 lines.append(line.strip())
             except EOFError:
                 break
-                
+
         raw_cookies = []
         for l in lines:
             if "_|WARNING" in l or ".ROBLOSECURITY" in l or len(l) > 50:
@@ -882,80 +1023,87 @@ while True:
             raw_cookies = [c.strip() for c in "".join(lines).split() if len(c) > 50]
 
         print(f"\n{C_YELLOW}  [⏳] Đang xác thực {len(raw_cookies)} Cookie và tiến hành Login hàng loạt...{C_RESET}")
-        
+
         success_count = 0
         for idx, raw_ck in enumerate(raw_cookies):
             if idx >= len(saved_pkgs):
                 print(f"{C_RED}  [!] Số lượng cookie vượt quá số Package hiện có!{C_RESET}")
                 break
-            target_pkg = saved_pkgs[idx]["pkg"]
+            target_item = saved_pkgs[idx]
+            target_pkg  = target_item["pkg"]
+            uid_app     = target_item.get("user_id", 0)
             uid, uname, valid_ck = verify_cookie(raw_ck)
             if uid:
                 cfg["accounts"] = [a for a in cfg["accounts"] if a["pkg"] != target_pkg]
                 new_acc = {"name": uname, "uid": uid, "pkg": target_pkg, "cookie": valid_ck}
                 cfg["accounts"].append(new_acc)
                 save_cfg(cfg)
-                
+
                 print(f"  {C_GREEN}[✔] Gắn thành công: {C_PURPLE}{uname}{C_GREEN} ➔ {target_pkg}{C_RESET}")
-                launched = launch_package_tab(
-                    target_pkg, cfg["game_id"], new_acc, is_rejoin=False, force_inject=True
-                )
+                launched = launch_package_tab(target_pkg, cfg["game_id"], new_acc, is_rejoin=False, force_inject=True, user_id=uid_app)
                 if launched:
                     success_count += 1
                 time.sleep(4)
             else:
                 print(f"  {C_RED}[✖] Cookie thứ {idx+1} không hợp lệ hoặc đã chết, bỏ qua.{C_RESET}")
-                
+
         save_cfg(cfg)
         print(f"\n{C_GREEN}{C_BOLD}  [✔ HOÀN TẤT] Đã gán và khởi động thành công {success_count} tài khoản!{C_RESET}")
         input(f"\n{C_DIM}  Bấm Enter để quay lại Menu chính...{C_RESET}")
-        
+
     elif choice == "4":
         os.system("clear")
         print(f"{C_CYAN}{C_BOLD}╔════════════════════════════════════════════════════════════════════════════╗{C_RESET}")
         print(f"{C_CYAN}{C_BOLD}║                        CÀI ĐẶT THÔNG SỐ HỆ THỐNG                           ║{C_RESET}")
         print(f"{C_CYAN}{C_BOLD}╚════════════════════════════════════════════════════════════════════════════╝{C_RESET}\n")
         gid = input(f"{C_YELLOW}{C_BOLD}  ➔ Nhập ID Game mới (Enter giữ nguyên [{cfg['game_id']}]): {C_RESET}").strip()
-        dl = input(f"\n{C_YELLOW}{C_BOLD}  ➔ Nhập Delay giây (Enter giữ nguyên [{cfg.get('delay', 20)}]s): {C_RESET}").strip()
-        if gid: cfg["game_id"] = gid
-        if dl.isdigit(): cfg["delay"] = int(dl)
+        dl  = input(f"\n{C_YELLOW}{C_BOLD}  ➔ Nhập Delay giây (Enter giữ nguyên [{cfg.get('delay', 20)}]s): {C_RESET}").strip()
+        if gid:
+            cfg["game_id"] = gid
+        if dl.isdigit():
+            cfg["delay"] = int(dl)
         save_cfg(cfg)
         print(f"\n{C_GREEN}{C_BOLD}  [✔] ĐÃ CẬP NHẬT CẤU HÌNH THÀNH CÔNG!{C_RESET}")
         time.sleep(1.5)
-        
+
     elif choice == "5":
         os.system("clear")
         print(f"{C_YELLOW}{C_BOLD}  [⏳] Đang ép dừng toàn bộ tab Roblox đã set...{C_RESET}")
         for item in cfg.get("packages", []):
-            exec_shell(f"am force-stop {shlex.quote(item['pkg'])}")
+            uid_app   = item.get("user_id", 0)
+            user_flag = f"--user {uid_app}" if uid_app != 0 else ""
+            exec_shell(f"am force-stop {user_flag} {shlex.quote(item['pkg'])}")
         print(f"\n{C_GREEN}{C_BOLD}  [✔] ĐÃ ĐÓNG XONG TOÀN BỘ TAB!{C_RESET}")
         input(f"\n{C_DIM}  Bấm Enter để quay lại...{C_RESET}")
-        
+
     elif choice == "6":
         os.system("clear")
         print(f"{C_CYAN}{C_BOLD}╔════════════════════════════════════════════════════════════════════════════╗{C_RESET}")
         print(f"{C_CYAN}{C_BOLD}║            KIỂM TRA TRẠNG THÁI IN-GAME (LIÊN KẾT SET PACKAGE)              ║{C_RESET}")
         print(f"{C_CYAN}{C_BOLD}╚════════════════════════════════════════════════════════════════════════════╝{C_RESET}\n")
-        
+
         saved_pkgs = cfg.get("packages", [])
-        acc_map = {a["pkg"]: a for a in cfg.get("accounts", [])}
-        
+        acc_map    = {a["pkg"]: a for a in cfg.get("accounts", [])}
+
         if not saved_pkgs:
             print(f"{C_RED}{C_BOLD}  (Chưa có Package nào được thêm ở mục [2]){C_RESET}\n")
         else:
             print(f"  {C_YELLOW}{C_BOLD}• ID Game đang cấu hình :{C_RESET} {C_GREEN}{C_BOLD}{cfg['game_id']}{C_RESET}\n")
             print(f"{C_CYAN}──────────────────────────────────────────────────────────────────────────────{C_RESET}")
             for i, item in enumerate(saved_pkgs):
-                pkg = item["pkg"]
+                pkg       = item["pkg"]
                 is_active = item.get("active", True)
-                acc = acc_map.get(pkg)
-                pid = run_shell(f"pidof {shlex.quote(pkg)}").strip()
-                
-                mode_str = f"{C_GREEN}{C_BOLD}✔ BẬT CHẠY{C_RESET}" if is_active else f"{C_RED}{C_BOLD}✖ ĐANG TẮT{C_RESET}"
-                app_str = f"{C_GREEN}{C_BOLD}ĐANG MỞ (PID: {pid}){C_RESET}" if pid else f"{C_RED}{C_BOLD}ĐÃ ĐÓNG (OFFLINE){C_RESET}"
-                
+                uid_app   = item.get("user_id", 0)
+                acc       = acc_map.get(pkg)
+                pid       = run_shell(f"pidof {shlex.quote(pkg)}").strip()
+                cloud_name = CLOUD_PHONE_PKGS.get(pkg, "")
+
+                mode_str  = f"{C_GREEN}{C_BOLD}✔ BẬT CHẠY{C_RESET}" if is_active else f"{C_RED}{C_BOLD}✖ ĐANG TẮT{C_RESET}"
+                app_str   = f"{C_GREEN}{C_BOLD}ĐANG MỞ (PID: {pid}){C_RESET}" if pid else f"{C_RED}{C_BOLD}ĐÃ ĐÓNG (OFFLINE){C_RESET}"
+                type_str  = f"{C_PURPLE}{cloud_name}{C_RESET}" if cloud_name else f"{C_DIM}Standard Package{C_RESET}"
+
                 if acc:
-                    ig = is_in_game(acc["uid"], acc.get("cookie"))
+                    ig      = is_in_game(acc["uid"], acc.get("cookie"))
                     acc_str = f"{C_PURPLE}{C_BOLD}{acc['name']}{C_RESET} (ID: {acc['uid']})"
                     if ig is True:
                         game_str = f"{C_GREEN}{C_BOLD}🎮 ĐANG TRONG GAME (IN-GAME){C_RESET}"
@@ -964,18 +1112,21 @@ while True:
                     else:
                         game_str = f"{C_RED}{C_BOLD}❌ MẤT KẾT NỐI / NGOÀI SẢNH{C_RESET}"
                 else:
-                    acc_str = f"{C_DIM}Chưa gắn Cookie (Chạy theo App){C_RESET}"
+                    acc_str  = f"{C_DIM}Chưa gắn Cookie (Chạy theo App){C_RESET}"
                     game_str = f"{C_YELLOW}{C_BOLD}⚠ Không check được API (Chưa gắn Cookie){C_RESET}"
 
                 print(f"\n  {C_YELLOW}{C_BOLD}[{i+1}] PACKAGE: {C_WHITE}{pkg}{C_RESET}")
+                print(f"      • Loại CloudPhone   : {type_str}")
+                if uid_app != 0:
+                    print(f"      • Android User ID   : {C_YELLOW}{uid_app} (Virtual Space){C_RESET}")
                 print(f"      • Chế độ CloudPhone : {mode_str}")
                 print(f"      • Tài khoản gắn     : {acc_str}")
                 print(f"      • Tiến trình App    : {app_str}")
                 print(f"      • Trạng thái Game   : {game_str}\n")
                 print(f"{C_DIM}──────────────────────────────────────────────────────────────────────────────{C_RESET}")
-                
+
         input(f"\n{C_CYAN}{C_BOLD}  Bấm Enter để quay lại Menu chính...{C_RESET}")
-        
+
     elif choice == "7":
         os.system("clear")
         print(f"{C_CYAN}{C_BOLD}=== QUẢN LÝ / XÓA DỮ LIỆU ==={C_RESET}\n")
@@ -986,18 +1137,24 @@ while True:
             for i, a in enumerate(cfg["accounts"]):
                 print(f"    [{i+1}] {a['name']} ({a['pkg']})")
             x = input("\n  Nhập STT tài khoản muốn xóa (hoặc gõ 'all'): ").strip()
-            if x.lower() == "all": cfg["accounts"] = []
-            elif x.isdigit() and 1 <= int(x) <= len(cfg["accounts"]): cfg["accounts"].pop(int(x)-1)
+            if x.lower() == "all":
+                cfg["accounts"] = []
+            elif x.isdigit() and 1 <= int(x) <= len(cfg["accounts"]):
+                cfg["accounts"].pop(int(x) - 1)
         elif sub == "2":
             for i, p in enumerate(cfg.get("packages", [])):
-                print(f"    [{i+1}] {p['pkg']}")
+                uid_label = f" (User:{p.get('user_id',0)})" if p.get("user_id", 0) != 0 else ""
+                print(f"    [{i+1}] {p['pkg']}{uid_label}")
             x = input("\n  Nhập STT package muốn xóa (hoặc gõ 'all'): ").strip()
-            if x.lower() == "all": cfg["packages"] = []
-            elif x.isdigit() and 1 <= int(x) <= len(cfg.get("packages", [])): cfg["packages"].pop(int(x)-1)
+            if x.lower() == "all":
+                cfg["packages"] = []
+            elif x.isdigit() and 1 <= int(x) <= len(cfg.get("packages", [])):
+                cfg["packages"].pop(int(x) - 1)
         save_cfg(cfg)
         print(f"\n{C_GREEN}{C_BOLD}  [✔] Đã cập nhật lại dữ liệu!{C_RESET}")
         time.sleep(1.5)
-        
+
     elif choice == "0":
         os.system("clear")
-        print(f"{C_CYAN}{C_BOLD}Hẹn gặp lại bạn!{C_RES... (Còn 1 KB)
+        print(f"\n{C_CYAN}{C_BOLD}  Hẹn gặp lại bạn! 👋{C_RESET}\n")
+        sys.exit(0)
