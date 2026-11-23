@@ -1105,7 +1105,8 @@ while True:
     print(f"{C_CYAN}{C_BOLD}║{C_RESET}   {C_YELLOW}{C_BOLD}• HIỆU SUẤT THIẾT BỊ   :{C_RESET}  {C_PURPLE}{C_BOLD}{f'CPU: {cpu_usage}  |  RAM: {ram_usage}  [{mode_label}]':<47}{C_RESET}{C_CYAN}{C_BOLD}║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║{C_RESET}   {C_YELLOW}{C_BOLD}• PACKAGE CLOUDPHONE   :{C_RESET}  {C_WHITE}{C_BOLD}{f'{active_count} đang BẬT  /  {len(pkgs_list)} đã lưu':<47}{C_RESET}{C_CYAN}{C_BOLD}║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║{C_RESET}   {C_YELLOW}{C_BOLD}• TÀI KHOẢN COOKIE     :{C_RESET}  {C_WHITE}{C_BOLD}{str(len(cfg['accounts'])) + ' tài khoản đã liên kết':<47}{C_RESET}{C_CYAN}{C_BOLD}║{C_RESET}")
-    print(f"{C_CYAN}{C_BOLD}║{C_RESET}   {C_YELLOW}{C_BOLD}• HWID / THỜI HẠN KEY  :{C_RESET}  {C_CYAN}{C_BOLD}{f'{LICENSE_INFO[\"hwid\"]} | Còn {LICENSE_INFO[\"remain_str\"]}':<47}{C_RESET}{C_CYAN}{C_BOLD}║{C_RESET}")
+    _key_stat = f"{LICENSE_INFO['hwid']} | Còn {LICENSE_INFO['remain_str']}"
+    print(f"{C_CYAN}{C_BOLD}║{C_RESET}   {C_YELLOW}{C_BOLD}• HWID / THỜI HẠN KEY  :{C_RESET}  {C_CYAN}{C_BOLD}{_key_stat:<47}{C_RESET}{C_CYAN}{C_BOLD}║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║                                                                            ║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}╚════════════════════════════════════════════════════════════════════════════╝{C_RESET}")
 
